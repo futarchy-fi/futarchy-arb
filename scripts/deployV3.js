@@ -21,6 +21,7 @@ async function main() {
     // Contract addresses for Gnosis Chain
     const config = {
         balancerV3Vault: v3VaultAddress,
+        balancerV2Vault: "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
         swaprRouter: "0xfFB643E73f280B97809A8b41f7232AB401a04ee1",
         futarchyRouter: "0x7495a583ba85875d59407781b4958ED6e0E1228f",
         algebraFactory: "0xA0864cCA6E114013AB0e27cbd5B6f4c8947da766",
@@ -38,6 +39,7 @@ async function main() {
 
     const contract = await Contract.deploy(
         config.balancerV3Vault,
+        config.balancerV2Vault,
         config.swaprRouter,
         config.futarchyRouter,
         config.algebraFactory,
@@ -54,7 +56,9 @@ async function main() {
     // Verification command
     console.log("\n🔍 Verify with:");
     console.log(`npx hardhat verify --network gnosis ${contractAddress} \\`);
-    console.log(`  "${config.balancerV3Vault}" "${config.swaprRouter}" "${config.futarchyRouter}" \\`);
+    console.log(
+        `  "${config.balancerV3Vault}" "${config.balancerV2Vault}" "${config.swaprRouter}" "${config.futarchyRouter}" \\`
+    );
     console.log(`  "${config.algebraFactory}" "${config.gnoToken}" "${config.sdaiToken}"`);
 
     console.log("\n📖 Usage:");

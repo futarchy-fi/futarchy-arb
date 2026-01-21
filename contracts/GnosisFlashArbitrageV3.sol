@@ -249,7 +249,7 @@ contract GnosisFlashArbitrageV3 is Ownable, ReentrancyGuard {
         uint256 borrowAmount,
         ArbitrageDirection direction,
         uint256 minProfit
-    ) external onlyOwner nonReentrant returns (ArbitrageResult memory result) {
+    ) external nonReentrant returns (ArbitrageResult memory result) {
         // Store state for callback
         _activeProposal = proposalAddress;
         _activeDirection = direction;
