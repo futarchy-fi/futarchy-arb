@@ -316,9 +316,6 @@ contract GnosisFlashArbitrage is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         uint256 fee = feeAmounts[0];
         uint256 repayAmount = borrowedAmount + fee;
         
-        // Record initial balance to calculate profit
-        uint256 initialBalance = IERC20(borrowedToken).balanceOf(address(this));
-        
         // Execute the arbitrage strategy based on type
         if (arbType == ArbitrageType.BALANCER_TO_SWAPR) {
             _executeBalancerToSwapr(borrowedToken, borrowedAmount);
@@ -381,10 +378,10 @@ contract GnosisFlashArbitrage is IFlashLoanRecipient, Ownable, ReentrancyGuard {
      * @notice Requires YES and NO token pools to exist on Swapr
      */
     function _executeFutarchyMerge(
-        address borrowedToken,
-        uint256 amount,
-        address proposal
-    ) internal {
+        address,
+        uint256,
+        address
+    ) internal pure {
         // This is a simplified version - in production you'd need:
         // 1. Know the YES/NO token addresses for the proposal
         // 2. Buy equal amounts of YES and NO tokens
@@ -401,10 +398,10 @@ contract GnosisFlashArbitrage is IFlashLoanRecipient, Ownable, ReentrancyGuard {
      * @dev Buy collateral (underpriced), split to YES+NO, sell YES and NO separately
      */
     function _executeFutarchySplit(
-        address borrowedToken,
-        uint256 amount,
-        address proposal
-    ) internal {
+        address,
+        uint256,
+        address
+    ) internal pure {
         // This is a simplified version - in production you'd need:
         // 1. Convert borrowedToken to collateral (GNO) if needed
         // 2. Split via FutarchyRouter to get YES+NO tokens
