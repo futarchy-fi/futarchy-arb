@@ -94,7 +94,8 @@ npx hardhat verify --network gnosis <CONTRACT_ADDRESS> \
 
 ## Security Considerations
 
-- Only owner can execute arbitrage and withdraw funds
+- Any address can execute arbitrage; profits are returned to the caller
+- Owner-only access remains for administrative actions and fund recovery
 - Reentrancy protection on all state-changing functions
 - Flash loan callback validates caller is Balancer Vault
 - Minimum profit requirement prevents dust attacks

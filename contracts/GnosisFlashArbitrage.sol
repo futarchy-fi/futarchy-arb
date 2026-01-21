@@ -258,7 +258,7 @@ contract GnosisFlashArbitrage is IFlashLoanRecipient, Ownable, ReentrancyGuard {
         ArbitrageType arbType,
         address proposal,
         uint256 minProfit
-    ) external onlyOwner nonReentrant {
+    ) external nonReentrant {
         // Record balance before flash loan
         uint256 balanceBefore = IERC20(borrowToken).balanceOf(address(this));
         
