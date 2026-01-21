@@ -375,7 +375,7 @@ contract GnosisFlashArbitrageV2 is IFlashLoanRecipient, Ownable, ReentrancyGuard
         uint256 borrowAmount,
         ArbitrageDirection direction,
         uint256 minProfit
-    ) external onlyOwner nonReentrant {
+    ) external nonReentrant {
         // Load and validate proposal
         ProposalInfo memory info = loadProposal(proposalAddress);
         require(info.isValid, "Invalid proposal: collateral tokens mismatch");
