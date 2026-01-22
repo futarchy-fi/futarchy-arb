@@ -9,7 +9,8 @@
         "deploy": "npx hardhat run scripts/deploy.js --network gnosis",
         "verify": "npx hardhat verify --network gnosis",
         "deploy:local": "npx hardhat run scripts/deploy.js --network hardhat",
-        "node": "npx hardhat node"
+        "node": "npx hardhat node",
+        "arb-bot": "npx hardhat run scripts/arb-bot.js --network gnosis"
     },
     "keywords": [
         "flash-loan",
