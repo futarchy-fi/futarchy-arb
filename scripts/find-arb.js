@@ -13,7 +13,7 @@ require("dotenv").config();
 // ═══════════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-    contractAddress: "0xe0545480aAB67Bc855806b1f64486F5c77F08eCC",
+    contractAddress: "0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a",  // V4 PERMISSIONLESS
     proposalAddress: "0x45e1064348fD8A407D6D1F59Fc64B05F633b28FC",
     sdaiAddress: "0xaf204776c7245bF4147c2612BF6e5972Ee483701",
     gnoAddress: "0x9C58BAcC331c9aa871AFD802DB6379a98e80CEdb",
@@ -43,7 +43,7 @@ async function main() {
     console.log("\n");
     console.log("╔══════════════════════════════════════════════════════════════════╗");
     console.log("║  🔥 FLASH ARBITRAGE FINDER                                       ║");
-    console.log("║  GnosisFlashArbitrageV2 - Static Call Analysis                   ║");
+    console.log("║  GnosisFlashArbitrageV4 - PERMISSIONLESS                        ║");
     console.log("╚══════════════════════════════════════════════════════════════════╝");
 
     const [signer] = await ethers.getSigners();
@@ -53,7 +53,7 @@ async function main() {
 
     // Connect to contract
     const contract = await ethers.getContractAt(
-        "GnosisFlashArbitrageV3",
+        "GnosisFlashArbitrageV4",
         CONFIG.contractAddress,
         signer
     );

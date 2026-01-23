@@ -12,8 +12,8 @@ const { ethers } = require("hardhat");
 // ═══════════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-    // V3 Contract
-    contractAddress: "0xe0545480aAB67Bc855806b1f64486F5c77F08eCC",
+    // V4 PERMISSIONLESS Contract
+    contractAddress: "0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a",
 
     // Proposal to check
     proposalAddress: "0x45e1064348fD8A407D6D1F59Fc64B05F633b28FC",
@@ -62,7 +62,7 @@ async function main() {
     console.log(`📋 Proposal: ${CONFIG.proposalAddress}`);
 
     const contract = await ethers.getContractAt(
-        "GnosisFlashArbitrageV3",
+        "GnosisFlashArbitrageV4",
         CONFIG.contractAddress,
         signer
     );

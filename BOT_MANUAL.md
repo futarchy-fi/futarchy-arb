@@ -1,5 +1,7 @@
 # 🤖 Gnosis Arbitrage Bot - Manual
 
+> **Contract**: [`GnosisFlashArbitrageV4`](https://gnosisscan.io/address/0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a#code) 🔓 **PERMISSIONLESS**
+
 This guide covers how to run, monitor, and optimize your automated arbitrage bot.
 
 ## 🚀 Persistent Running (Persistence)

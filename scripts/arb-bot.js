@@ -16,7 +16,7 @@ const path = require("path");
 // ═══════════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-    contractAddress: "0xe0545480aAB67Bc855806b1f64486F5c77F08eCC",
+    contractAddress: "0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a",  // V4 PERMISSIONLESS
     proposalAddress: "0x45e1064348fD8A407D6D1F59Fc64B05F633b28FC",
 
     // Token addresses
@@ -54,7 +54,7 @@ async function main() {
     console.log("=".repeat(60));
 
     const [signer] = await ethers.getSigners();
-    const contract = await ethers.getContractAt("GnosisFlashArbitrageV3", CONFIG.contractAddress, signer);
+    const contract = await ethers.getContractAt("GnosisFlashArbitrageV4", CONFIG.contractAddress, signer);
 
     // Create logs directory if it doesn't exist
     const logsDir = path.dirname(CONFIG.logFile);

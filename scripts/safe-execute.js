@@ -10,7 +10,7 @@
 const { ethers } = require("hardhat");
 
 const CONFIG = {
-    contractAddress: "0x5590349f7a460aff6c04f2c70a9d1eedab94f6eb",
+    contractAddress: "0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a",  // V4 PERMISSIONLESS
     proposalAddress: "0x45e1064348fD8A407D6D1F59Fc64B05F633b28FC",
     gnoAddress: "0x9C58BAcC331c9aa871AFD802DB6379a98e80CEdb",
 
@@ -39,7 +39,7 @@ async function main() {
     console.log(`🧪 Strategy: SPOT_SPLIT (Borrow GNO)`);
 
     const contract = await ethers.getContractAt(
-        "GnosisFlashArbitrageV3",
+        "GnosisFlashArbitrageV4",
         CONFIG.contractAddress,
         signer
     );

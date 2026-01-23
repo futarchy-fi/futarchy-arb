@@ -1,8 +1,8 @@
-# GnosisFlashArbitrageV3 - Usage Guide
+# GnosisFlashArbitrageV4 - Usage Guide
 
-**Contract**: `0x5649CA18945a8cf36945aA2674f74db3634157cC`  
+**Contract**: `0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a` 🔓 **PERMISSIONLESS**  
 **Network**: Gnosis Chain  
-**Verified**: https://gnosisscan.io/address/0x5649CA18945a8cf36945aA2674f74db3634157cC#code
+**Verified**: https://gnosisscan.io/address/0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a#code
 
 ## The `direction` Parameter
 

@@ -109,4 +109,5 @@ MIT
 For a detailed breakdown of the Legacy vs New contract architecture, see [CONTRACTS.md](./docs/CONTRACTS.md).
 
 - **Legacy (V3-only)**: `0x5649CA18945a8cf36945aA2674f74db3634157cC` (Deprecated - broken repayment)
-- **Active (V2-integrated)**: `0xe0545480aAB67Bc855806b1f64486F5c77F08eCC` (Recommended - fixes repayment via V2 batchSwap)
+- **V3 (Owner-Only)**: `0xe0545480aAB67Bc855806b1f64486F5c77F08eCC` (V2-integrated, owner-restricted)
+- **V4 (PERMISSIONLESS)**: `0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a` ✅ **ACTIVE** - Anyone can execute arbitrage!
