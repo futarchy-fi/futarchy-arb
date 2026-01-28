@@ -18,6 +18,8 @@
 9. [Verified Paths for VLR/USDS](#verified-paths-for-vlrusds)
 10. [Solidity Interfaces](#solidity-interfaces)
 11. [Common Patterns](#common-patterns)
+12. [Universal Router + Permit2 (Modern Approach)](#universal-router--permit2-modern-approach)
+13. [MEV Protection & Slippage](#mev-protection--slippage)
 
 ---
 
@@ -659,6 +661,37 @@ FlashFee = 100,000 × (3000 / 1,000,000) = 300 VLR
 - You want lower/no fees
 - You need tokens not in Uniswap pools
 
+### ⚠️ CRITICAL: Pool Locking (LOK Error)
+
+> [!CAUTION]
+> **You CANNOT swap through the same pool you borrowed from during the flash callback!**
+
+Uniswap V3 pools have a re-entrancy lock. When you call `flash()`, the pool is **locked** until the callback completes. Any attempt to call `swap()` on that same pool will revert with error code `LOK` (Locked).
+
+**Example Failure:**
+```
+1. Flash borrow VLR from VLR/USDC pool (0.3% fee)
+2. ... do arbitrage ...
+3. Swap USDS → USDC → VLR (multi-hop through VLR/USDC pool)
+   ❌ REVERTS with "LOK" - pool is still locked!
+```
+
+**Solutions:**
+1. **Use Balancer for flash loan** - Balancer V2 has no pool locking (211M VLR available, 0% fee!)
+2. **Use different pool for swap** - Find an alternative route that avoids the flash loan source pool
+3. **Use Balancer for final swap** - Route through Balancer instead of Uniswap for repayment
+
+**Recommended Architecture:**
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Balancer V2 Flash Loan (0% fee, no locking)                    │
+│  ↓                                                              │
+│  Uniswap V3 Swaps (any pools, no conflict)                      │
+│  ↓                                                              │
+│  Repay to Balancer                                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## Verified Paths for VLR/USDS
@@ -941,16 +974,281 @@ function uniswapV3FlashCallback(
 
 ---
 
+## Universal Router + Permit2 (Modern Approach)
+
+> **⚠️ IMPORTANT**: For production swaps on Mainnet, use the **Universal Router** with **Permit2** instead of the legacy SwapRouter. This provides better MEV protection and gas efficiency.
+
+### Why Universal Router?
+
+| Feature | Legacy SwapRouter | Universal Router + Permit2 |
+|---------|-------------------|---------------------------|
+| **Address** | `0xE592427A0AEce92De3Edee1F18E0157C05861564` | `0x66a9893cc07d91d95644aedd05d03f95e1dba8af` |
+| **Approval** | Direct ERC20 approve | Two-step via Permit2 |
+| **Gas** | Higher per swap | Lower (reusable approvals) |
+| **Batching** | Limited | Full command batching |
+| **MEV Protection** | None built-in | Slippage enforcement |
+
+### Contract Addresses (Mainnet)
+
+```javascript
+const PERMIT2 = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+const UNIVERSAL_ROUTER = '0x66a9893cc07d91d95644aedd05d03f95e1dba8af';
+const QUOTER_V2 = '0x61fFE014bA17989E743c5F6cB21bF9697530B21e';
+```
+
+### Approval Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Token as ERC20 Token
+    participant Permit2
+    participant Router as Universal Router
+    participant Pool as Uniswap V3 Pool
+
+    Note over User,Pool: Step 1: Token → Permit2 (one-time MAX approval)
+    User->>Token: approve(Permit2, MAX_UINT256)
+    
+    Note over User,Pool: Step 2: Permit2 → Router (amount + expiration)
+    User->>Permit2: approve(token, Router, amount, expiration)
+    
+    Note over User,Pool: Step 3: Execute Swap
+    User->>Router: execute(commands, inputs, deadline)
+    Router->>Permit2: transferFrom(user, pool, amount)
+    Permit2->>Token: transferFrom(user, pool, amount)
+    Router->>Pool: swap(...)
+    Pool-->>User: tokens out
+```
+
+### Complete JavaScript Example
+
+```javascript
+const { ethers } = require('ethers');
+
+// Addresses
+const PERMIT2 = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+const UNIVERSAL_ROUTER = '0x66a9893cc07d91d95644aedd05d03f95e1dba8af';
+const QUOTER_V2 = '0x61fFE014bA17989E743c5F6cB21bF9697530B21e';
+
+// ABIs
+const PERMIT2_ABI = [
+    'function approve(address token, address spender, uint160 amount, uint48 expiration) external',
+    'function allowance(address owner, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)'
+];
+
+const UNIVERSAL_ROUTER_ABI = [
+    'function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable'
+];
+
+const QUOTER_ABI = [
+    'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)'
+];
+
+// Constants
+const MAX_UINT160 = BigInt('0xffffffffffffffffffffffffffffffffffffffff');
+const MAX_UINT48 = 281474976710655n;  // Max expiration
+const V3_SWAP_EXACT_IN = 0x00;  // Universal Router command
+
+async function swapWithPermit2(wallet, tokenIn, tokenOut, amountIn, fee = 500) {
+    const provider = wallet.provider;
+    const token = new ethers.Contract(tokenIn, ['function approve(address,uint256) returns (bool)', 'function allowance(address,address) view returns (uint256)'], wallet);
+    const permit2 = new ethers.Contract(PERMIT2, PERMIT2_ABI, wallet);
+    const router = new ethers.Contract(UNIVERSAL_ROUTER, UNIVERSAL_ROUTER_ABI, wallet);
+    const quoter = new ethers.Contract(QUOTER_V2, QUOTER_ABI, provider);
+    
+    // 1. Get quote for slippage calculation
+    const quoteResult = await quoter.quoteExactInputSingle.staticCall({
+        tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96: 0
+    });
+    const expectedOut = quoteResult[0];
+    const minOut = (expectedOut * 97n) / 100n;  // 3% slippage
+    
+    console.log('Expected:', ethers.formatEther(expectedOut));
+    console.log('Min (3% slippage):', ethers.formatEther(minOut));
+    
+    // 2. Approve token to Permit2 (one-time MAX)
+    const allowance = await token.allowance(wallet.address, PERMIT2);
+    if (allowance < amountIn) {
+        const tx = await token.approve(PERMIT2, ethers.MaxUint256);
+        await tx.wait();
+    }
+    
+    // 3. Approve Permit2 to Universal Router
+    const p2Allowance = await permit2.allowance(wallet.address, tokenIn, UNIVERSAL_ROUTER);
+    if (p2Allowance[0] < amountIn) {
+        const tx = await permit2.approve(tokenIn, UNIVERSAL_ROUTER, MAX_UINT160, MAX_UINT48);
+        await tx.wait();
+    }
+    
+    // 4. Build and execute swap
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+    const path = ethers.solidityPacked(['address', 'uint24', 'address'], [tokenIn, fee, tokenOut]);
+    
+    // V3_SWAP_EXACT_IN params: recipient, amountIn, amountOutMinimum, path, payerIsUser
+    const swapParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ['address', 'uint256', 'uint256', 'bytes', 'bool'],
+        [wallet.address, amountIn, minOut, path, true]
+    );
+    
+    const tx = await router.execute(
+        ethers.hexlify(new Uint8Array([V3_SWAP_EXACT_IN])),
+        [swapParams],
+        deadline,
+        { gasLimit: 300000 }
+    );
+    
+    return tx;
+}
+```
+
+---
+
+## MEV Protection & Slippage
+
+### What is MEV?
+
+**MEV (Maximal Extractable Value)** refers to profits that miners/validators can extract by reordering, inserting, or censoring transactions. Common MEV attacks on swaps:
+
+| Attack | Description | Protection |
+|--------|-------------|------------|
+| **Sandwich** | Bot frontruns your swap, pumps price, backruns after | Slippage limits |
+| **Frontrunning** | Bot sees your tx, executes same trade first | Private mempools |
+| **Just-In-Time (JIT)** | Bot provides concentrated liquidity just for your trade | Hard to prevent |
+
+### Slippage Protection
+
+**Always set `amountOutMinimum` to protect against MEV:**
+
+```javascript
+// ❌ BAD: No slippage protection (MEV will extract value)
+const minOut = 0;
+
+// ✅ GOOD: 3% slippage protection
+const expectedOut = await quoter.quoteExactInputSingle.staticCall({...});
+const minOut = (expectedOut * 97n) / 100n;  // Accept 3% worse
+
+// ✅ BETTER: Dynamic slippage based on pool type
+function getSlippage(poolType) {
+    const slippages = {
+        'stable': 0.1,      // 0.1% for stablecoins
+        'major': 0.5,       // 0.5% for ETH/USDC etc
+        'standard': 1.0,    // 1% for normal pairs
+        'conditional': 3.0, // 3% for Futarchy conditional tokens
+        'lowLiquidity': 5.0 // 5% for thin markets
+    };
+    return slippages[poolType] || 1.0;
+}
+```
+
+### MEV Protection Strategies
+
+#### 1. Use Flashbots/Private Mempools
+
+```javascript
+// Send tx directly to block builders (not public mempool)
+const flashbotsProvider = new ethers.providers.JsonRpcProvider(
+    'https://rpc.flashbots.net'
+);
+
+// Tx goes to Flashbots, invisible to MEV bots
+const tx = await wallet.connect(flashbotsProvider).sendTransaction({...});
+```
+
+#### 2. Set Realistic Deadlines
+
+```javascript
+// ❌ BAD: Infinite deadline
+const deadline = ethers.MaxUint256;
+
+// ✅ GOOD: Short deadline (10 minutes)
+const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+```
+
+#### 3. Use QuoterV2 Just Before Swap
+
+```javascript
+// Get quote immediately before swap (not cached)
+const quote = await quoter.quoteExactInputSingle.staticCall({...});
+const minOut = (quote[0] * 97n) / 100n;
+
+// Execute within same block ideally
+const tx = await router.execute(...);
+```
+
+### Example: MEV-Resistant Swap
+
+```javascript
+async function mevResistantSwap(wallet, tokenIn, tokenOut, amountIn, slippagePercent = 3) {
+    const quoter = new ethers.Contract(QUOTER_V2, QUOTER_ABI, wallet.provider);
+    const router = new ethers.Contract(UNIVERSAL_ROUTER, UNIVERSAL_ROUTER_ABI, wallet);
+    
+    // 1. Get fresh quote (don't use stale data)
+    const quoteResult = await quoter.quoteExactInputSingle.staticCall({
+        tokenIn, tokenOut, amountIn, fee: 500, sqrtPriceLimitX96: 0
+    });
+    const expectedOut = quoteResult[0];
+    
+    // 2. Calculate minimum with slippage
+    const slippageFactor = 100n - BigInt(slippagePercent);
+    const minOut = (expectedOut * slippageFactor) / 100n;
+    
+    // 3. Short deadline (10 minutes)
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+    
+    // 4. Build swap with protection
+    const path = ethers.solidityPacked(['address', 'uint24', 'address'], [tokenIn, 500, tokenOut]);
+    const swapParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ['address', 'uint256', 'uint256', 'bytes', 'bool'],
+        [
+            wallet.address,  // recipient
+            amountIn,        // exact input
+            minOut,          // ⚡ MEV PROTECTION: minimum output
+            path,
+            true             // payer is user
+        ]
+    );
+    
+    // 5. Execute
+    console.log(`Swapping with ${slippagePercent}% slippage protection`);
+    console.log(`Expected: ${ethers.formatEther(expectedOut)}`);
+    console.log(`Minimum: ${ethers.formatEther(minOut)}`);
+    
+    const tx = await router.execute(
+        ethers.hexlify(new Uint8Array([V3_SWAP_EXACT_IN])),
+        [swapParams],
+        deadline,
+        { gasLimit: 300000 }
+    );
+    
+    return tx;
+}
+```
+
+### Slippage Recommendations by Pool Type
+
+| Pool Type | Recommended Slippage | Reason |
+|-----------|---------------------|--------|
+| Stablecoins (USDC/USDT) | 0.1% - 0.3% | Very tight peg |
+| Major pairs (ETH/USDC) | 0.3% - 0.5% | High liquidity |
+| Standard pairs | 0.5% - 1% | Normal volatility |
+| **Conditional tokens** | **3% - 5%** | Low liquidity, high volatility |
+| Exotic/new tokens | 5% - 10% | Very thin books |
+
+---
+
 ## Summary
 
 | Topic | Key Points |
 |-------|------------|
 | **Architecture** | No vault, each pool is independent |
 | **Swaps** | Use SwapRouter with `exactInputSingle` or `exactInput` |
+| **Modern Swaps** | Use Universal Router + Permit2 for production |
 | **Multi-hop** | Encode path as `token + fee + token + fee + token` |
 | **Flash Loans** | Call `pool.flash()`, implement callback, repay + fee |
 | **Fees** | 0.01%, 0.05%, 0.3%, 1% tiers |
 | **VLR/USDS** | Route via USDC: VLR ↔ USDC ↔ USDS |
+| **MEV Protection** | Always set `amountOutMinimum` with recent quote |
+| **Slippage** | 3-5% for conditional tokens, 0.3-1% for standard |
 
 ---
 
@@ -959,4 +1257,8 @@ function uniswapV3FlashCallback(
 - [Uniswap V3 Docs](https://docs.uniswap.org/contracts/v3/overview)
 - [Uniswap V3 SDK](https://docs.uniswap.org/sdk/v3/overview)
 - [SwapRouter Interface](https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter)
+- [Universal Router](https://docs.uniswap.org/contracts/universal-router/overview)
+- [Permit2](https://docs.uniswap.org/contracts/permit2/overview)
 - [Flash Swaps](https://docs.uniswap.org/contracts/v3/guides/flash-integrations/flash-callback)
+- [Flashbots RPC](https://docs.flashbots.net/flashbots-protect/quick-start)
+

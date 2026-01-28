@@ -36,6 +36,36 @@
 
 > **Note:** Balancer V2 Vault has the same address on all chains!
 
+### Check Flash Loan Availability
+
+**Critical for arbitrage:** Check if a token has liquidity in the Vault before attempting flash loans.
+
+```javascript
+const { ethers } = require('ethers');
+
+const V2_VAULT = '0xBA12222222228d8Ba445958a75a0704d566BF2C8';
+const ERC20_ABI = ['function balanceOf(address) view returns (uint256)'];
+
+async function checkFlashLoanAvailability(tokenAddress, provider) {
+    const token = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+    const vaultBalance = await token.balanceOf(V2_VAULT);
+    
+    console.log('Token balance in V2 Vault:', ethers.formatEther(vaultBalance));
+    return vaultBalance;
+}
+
+// Example: Check VLR and USDS availability
+const VLR = '0x4e107a0000DB66f0E9Fd2039288Bf811dD1f9c74';
+const USDS = '0xdC035D45d973E3EC169d2276DDab16f1e407384F';
+
+// Results (2026-01-28):
+// VLR:  210,000,000 VLR ✅ (can flash borrow)
+// USDS: 0 USDS ❌ (cannot flash borrow)
+```
+
+> [!IMPORTANT]
+> **Why this matters:** Balancer V2 Vault holds all pool tokens centrally. The `balanceOf(VAULT)` shows total available for flash loans. If a token has 0 balance, you **cannot** flash borrow it - design your arbitrage strategy accordingly!
+
 ---
 
 ## Core Concepts

@@ -10,10 +10,11 @@
 2. [When to Use Which Router](#when-to-use-which-router)
 3. [Direct Pools (Standard Swap)](#direct-pools-standard-swap)
 4. [Boosted Pools (Wrapped Tokens)](#boosted-pools-wrapped-tokens)
-5. [Complete ABIs](#complete-abis)
-6. [Permit2 Integration](#permit2-integration)
-7. [Live Examples](#live-examples)
-8. [Troubleshooting](#troubleshooting)
+5. [Flash Loans (V2 vs V3)](#flash-loans-v2-vs-v3)
+6. [Complete ABIs](#complete-abis)
+7. [Permit2 Integration](#permit2-integration)
+8. [Live Examples](#live-examples)
+9. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -377,6 +378,240 @@ async function boostedPoolSwap(signer, params) {
   return receipt;
 }
 ```
+
+---
+
+## Flash Loans (V2 vs V3)
+
+Flash loans allow you to borrow tokens without collateral, as long as you repay within the same transaction.
+
+### V2 vs V3 Comparison
+
+| Feature | Balancer V2 | Balancer V3 |
+|---------|-------------|-------------|
+| **Contract** | Vault `0xBA12222222228d8Ba445958a75a0704d566BF2C8` | Vault `0xbA1333333333a1BA1108E8412f11850A5C319bA9` |
+| **Function** | `flashLoan(recipient, tokens, amounts, userData)` | `unlock(data)` + transient storage |
+| **Callback** | `receiveFlashLoan(tokens, amounts, feeAmounts, userData)` | Custom via reentrancy |
+| **Fee** | **0%** (FREE!) | **0%** (FREE!) |
+| **Multi-token** | ✅ Yes | ✅ Yes |
+| **Liquidity** | Very deep (legacy pools) | Growing (new pools) |
+
+### When to Use V2 vs V3
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    WHICH VAULT HAS YOUR TOKEN?                   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+              ▼                               ▼
+     ┌─────────────────┐            ┌─────────────────┐
+     │  V2 Vault has   │            │  V3 Vault has   │
+     │  more liquidity │            │  more liquidity │
+     └─────────────────┘            └─────────────────┘
+              │                               │
+              ▼                               ▼
+     ┌─────────────────┐            ┌─────────────────┐
+     │  Use V2 Flash   │            │  Use V3 Flash   │
+     │  flashLoan()    │            │  unlock()       │
+     └─────────────────┘            └─────────────────┘
+```
+
+### Check Token Availability
+
+```javascript
+const { ethers } = require('ethers');
+
+const V2_VAULT = '0xBA12222222228d8Ba445958a75a0704d566BF2C8';
+const V3_VAULT = '0xbA1333333333a1BA1108E8412f11850A5C319bA9';
+const ERC20_ABI = ['function balanceOf(address) view returns (uint256)'];
+
+async function checkFlashLoanAvailability(tokenAddress, provider) {
+    const token = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+    
+    const v2Balance = await token.balanceOf(V2_VAULT);
+    const v3Balance = await token.balanceOf(V3_VAULT);
+    
+    console.log('V2 Vault balance:', ethers.formatEther(v2Balance));
+    console.log('V3 Vault balance:', ethers.formatEther(v3Balance));
+    
+    return {
+        v2Available: v2Balance,
+        v3Available: v3Balance,
+        recommended: v2Balance > v3Balance ? 'V2' : 'V3'
+    };
+}
+```
+
+---
+
+### Balancer V2 Flash Loans
+
+**Best for**: Tokens with deep V2 liquidity (AAVE, GHO, VLR, etc.)
+
+#### V2 Interface
+
+```solidity
+interface IBalancerV2Vault {
+    function flashLoan(
+        IFlashLoanRecipient recipient,
+        IERC20[] memory tokens,
+        uint256[] memory amounts,
+        bytes memory userData
+    ) external;
+}
+
+interface IFlashLoanRecipient {
+    function receiveFlashLoan(
+        IERC20[] memory tokens,
+        uint256[] memory amounts,
+        uint256[] memory feeAmounts,
+        bytes memory userData
+    ) external;
+}
+```
+
+#### V2 Solidity Example
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+interface IBalancerV2Vault {
+    function flashLoan(
+        address recipient,
+        IERC20[] memory tokens,
+        uint256[] memory amounts,
+        bytes memory userData
+    ) external;
+}
+
+contract BalancerV2FlashExample {
+    IBalancerV2Vault constant VAULT = IBalancerV2Vault(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
+    
+    function executeFlashLoan(address token, uint256 amount) external {
+        IERC20[] memory tokens = new IERC20[](1);
+        tokens[0] = IERC20(token);
+        
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = amount;
+        
+        // userData can encode any info needed in callback
+        bytes memory userData = abi.encode(msg.sender, amount);
+        
+        VAULT.flashLoan(address(this), tokens, amounts, userData);
+    }
+    
+    // Callback - called by Vault during flashLoan
+    function receiveFlashLoan(
+        IERC20[] memory tokens,
+        uint256[] memory amounts,
+        uint256[] memory feeAmounts,  // Always 0 for Balancer V2!
+        bytes memory userData
+    ) external {
+        require(msg.sender == address(VAULT), "Only Vault");
+        
+        // You now have the borrowed tokens!
+        // Do your arbitrage, liquidation, etc. here
+        
+        // ... your logic ...
+        
+        // Repay: transfer back to Vault (fees are 0, so just principal)
+        for (uint256 i = 0; i < tokens.length; i++) {
+            tokens[i].transfer(address(VAULT), amounts[i] + feeAmounts[i]);
+        }
+    }
+}
+```
+
+---
+
+### Balancer V3 Flash Loans
+
+**Best for**: New pools, tokens primarily in V3 ecosystem
+
+V3 uses a different pattern with `unlock()` and transient storage:
+
+#### V3 Interface
+
+```solidity
+interface IBalancerV3Vault {
+    function unlock(bytes calldata data) external returns (bytes memory);
+    function sendTo(IERC20 token, address to, uint256 amount) external;
+    function settle(IERC20 token, uint256 amount) external returns (uint256);
+}
+```
+
+#### V3 Solidity Example
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+interface IBalancerV3Vault {
+    function unlock(bytes calldata data) external returns (bytes memory);
+    function sendTo(IERC20 token, address to, uint256 amount) external;
+    function settle(IERC20 token, uint256 amount) external returns (uint256);
+}
+
+contract BalancerV3FlashExample {
+    IBalancerV3Vault constant VAULT = IBalancerV3Vault(0xbA1333333333a1BA1108E8412f11850A5C319bA9);
+    
+    function executeFlashLoan(address token, uint256 amount) external {
+        // Encode the operation for the callback
+        bytes memory data = abi.encode(token, amount, msg.sender);
+        
+        // unlock() will call back into this contract
+        VAULT.unlock(data);
+    }
+    
+    // Called by Vault during unlock()
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        require(msg.sender == address(VAULT), "Only Vault");
+        
+        (address token, uint256 amount, address caller) = abi.decode(data, (address, uint256, address));
+        
+        // 1. Request tokens from Vault
+        VAULT.sendTo(IERC20(token), address(this), amount);
+        
+        // 2. You now have the borrowed tokens!
+        // Do your arbitrage, liquidation, etc. here
+        
+        // ... your logic ...
+        
+        // 3. Repay: approve and settle
+        IERC20(token).approve(address(VAULT), amount);
+        VAULT.settle(IERC20(token), amount);
+        
+        return "";
+    }
+}
+```
+
+---
+
+### Real Example: VLR Flash Loan Availability
+
+```javascript
+// Check VLR availability in both vaults
+const VLR = '0x4e107a0000DB66f0E9Fd2039288Bf811dD1f9c74';
+
+async function main() {
+    const provider = new ethers.JsonRpcProvider(RPC_URL);
+    const result = await checkFlashLoanAvailability(VLR, provider);
+    
+    // Result (as of Jan 2026):
+    // V2 Vault: 211,475,944 VLR  ✅ Use this!
+    // V3 Vault: 1,304 VLR        ❌ Too small
+}
+```
+
+> **Tip**: For most established tokens (VLR, AAVE, GHO, etc.), Balancer V2 has significantly more liquidity due to legacy pools.
 
 ---
 
