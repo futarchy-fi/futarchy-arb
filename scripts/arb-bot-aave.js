@@ -63,10 +63,10 @@ async function main() {
 
     const provider = new ethers.JsonRpcProvider(CONFIG.rpcUrl);
 
-    // Check if wallet is available
+    // Check if wallet is available (uses PRIVATE_KEY_AAVE for Mainnet bot)
     let signer = null;
-    if (process.env.PRIVATE_KEY) {
-        signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+    if (process.env.PRIVATE_KEY_AAVE) {
+        signer = new ethers.Wallet(process.env.PRIVATE_KEY_AAVE, provider);
         console.log(`👤 Wallet: ${signer.address}`);
         const balance = await provider.getBalance(signer.address);
         console.log(`💰 Balance: ${ethers.formatEther(balance)} ETH`);
