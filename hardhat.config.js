@@ -22,24 +22,20 @@ module.exports = {
             }
         },
         gnosis: {
-            url: process.env.RPC_URL || "https://rpc.gnosischain.com",
+            url: process.env.GNOSIS_RPC_URL || "https://rpc.gnosischain.com",
             accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
             chainId: 100,
+            gasPrice: "auto"
+        },
+        mainnet: {
+            url: process.env.RPC_URL || "https://ethereum.publicnode.com",
+            accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+            chainId: 1,
             gasPrice: "auto"
         }
     },
     etherscan: {
-        apiKey: process.env.GNOSISSCAN_API_KEY || "",
-        customChains: [
-            {
-                network: "gnosis",
-                chainId: 100,
-                urls: {
-                    apiURL: "https://api.gnosisscan.io/api",
-                    browserURL: "https://gnosisscan.io"
-                }
-            }
-        ]
+        apiKey: process.env.ETHERSCAN_API_KEY || ""
     },
     sourcify: {
         enabled: false  // Disable Sourcify to force Etherscan verification
