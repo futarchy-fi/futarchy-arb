@@ -19,9 +19,10 @@ Extract the token addresses from the proposal:
 
 | Token Type | Description | Example |
 |------------|-------------|---------|
-| **CompanyToken** | The governance token of the project | AAVE, GNO |
-| **CollateralToken** | Token used as collateral in conditional markets | sDAI, WETH |
-| **CurrencyToken** | Base currency for trading | USDC, DAI |
+| **CompanyToken** | The governance token of the project | AAVE, GNO |(CollateralToken1)
+| 
+|**CurrencyToken** | Base currency for trading | USDC, SDAI |
+|(CollateralToken2)
 
 ### Step 3: Find Liquidity Sources
 Search for liquidity pools between tokens:
