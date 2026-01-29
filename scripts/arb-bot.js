@@ -248,7 +248,7 @@ async function executeTrade(contract, arb) {
             arb.borrowToken === "GNO" ? CONFIG.tokens.GNO : CONFIG.tokens.SDAI,
             ethers.parseEther(arb.amount),
             arb.strategy === "SPOT_SPLIT" ? 0 : 1,
-            ethers.parseEther((arb.profit * 0.9).toFixed(6)), // 90% min profit safety
+            0, // minProfit = 0 (same as simulation)
             { gasLimit: CONFIG.estimatedGasLimit }
         );
 
