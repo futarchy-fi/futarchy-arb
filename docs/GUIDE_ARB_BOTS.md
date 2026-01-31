@@ -7,7 +7,7 @@ Comprehensive guide for running permissionless flash arbitrage bots on Futarchy 
 | Network | Contract | Address | Bot Script |
 |---------|----------|---------|------------|
 | **Gnosis Chain** | GnosisFlashArbitrageV4 | [`0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a`](https://gnosisscan.io/address/0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a) | `scripts/arb-bot.js` |
-| **Ethereum Mainnet** | AaveFlashArbitrageV2 | [`0x098321F3f0d20dD4fc9559267a9B1c88AaDd2876`](https://etherscan.io/address/0x098321F3f0d20dD4fc9559267a9B1c88AaDd2876) | `scripts/arb-bot-aave.js` |
+| **Ethereum Mainnet** | **AaveFlashArbitrageV6** | [`0xBc69Db11D5Eb837926E8f5Bb6Dd20069193919AE`](https://etherscan.io/address/0xBc69Db11D5Eb837926E8f5Bb6Dd20069193919AE) | `scripts/arb-bot-aave-v6.js` |
 | **Ethereum Mainnet** | VLRFlashArbitrageV3 | [`0xe0A988Ccb9b65036Bc7C6E307De6e5518a0F3B62`](https://etherscan.io/address/0xe0A988Ccb9b65036Bc7C6E307De6e5518a0F3B62) | `scripts/arb-bot-vlr.js` |
 
 ---
@@ -39,13 +39,10 @@ npx hardhat run scripts/arb-bot.js --network gnosis
 CONFIRM=true npx hardhat run scripts/arb-bot.js --network gnosis
 ```
 
-**Ethereum Mainnet (AAVE/GHO markets):**
+**Ethereum Mainnet (AAVE/GHO markets - V6):**
 ```bash
-# Dry run (simulation only)
-node scripts/arb-bot-aave.js
-
-# Live execution
-CONFIRM=true node scripts/arb-bot-aave.js
+# Continuous monitoring & execution check
+node scripts/arb-bot-aave-v6.js
 ```
 
 **Ethereum Mainnet (VLR/USDS markets):**
@@ -61,18 +58,32 @@ CONFIRM=true node scripts/arb-bot-vlr.js
 
 ## Architecture Comparison
 
-| Feature | Gnosis V4 | Mainnet AAVE/GHO | Mainnet VLR/USDS |
-|---------|-----------|------------------|------------------|
-| **Flash Loan** | Balancer V3 | Balancer V3 | Balancer V2 (0% fee!) |
-| **Outcome Swaps** | Algebra (Uniswap V3 fork) | Uniswap V3 | Uniswap V3 + Universal Router |
-| **Repayment** | Direct pools | Balancer V2 (3-hop) | Uniswap V3 (multi-hop) |
+| Feature | Gnosis V4 | Mainnet AAVE V6 | Mainnet VLR V3 |
+|---------|-----------|-----------------|----------------|
+| **Flash Loan** | Balancer V3 | Balancer V2 (0% fee!) | Balancer V2 (0% fee!) |
+| **Outcome Swaps** | Algebra (Uniswap V3 fork) | Uniswap V3 (Dynamic) | Uniswap V3 (Universal) |
+| **Repayment** | Direct pools | Universal Router + Permit2 | Universal Router + Permit2 |
 | **Collaterals** | GNO / sDAI | AAVE / GHO | VLR / USDS |
-| **Pool Type** | YES_GNO/YES_SDAI | YES_AAVE/YES_GHO | YES_VLR/YES_USDS |
-| **MEV Protection** | minProfit | minProfit | minProfit |
+| **Pool Logic** | Auto-Discovery | **Dynamic Proposal Loading** | Hardcoded |
+| **MEV Protection** | minProfit | minProfit + Atomic Revert | minProfit + Atomic Revert |
 
 ---
 
-## Arbitrage Strategies
+## Aave V6 Strategy Details
+
+The Aave V6 bot handles the complex 4-hop swap and dynamic proposal loading:
+
+1.  **Dynamic Loading**: The contract inspects `FutarchyProposal` collateral to determine YES/NO token addresses automatically.
+2.  **Optimized Path**: Uses `AAVE -> WETH -> USDC (0.05%) -> GHO (0.05%)` path. The **0.05% GHO/USDC pool** is critical as it has deep liquidity (~163k GHO), whereas the 0.01% pool is empty.
+3.  **Strategies**:
+    *   **SPOT_SPLIT**: Borrow AAVE → Split to YES+NO → Swap Outcomes to GHO → Merge → Swap GHO to AAVE.
+    *   **MERGE_SPOT**: Borrow AAVE → Swap to GHO → Split to YES+NO → Swap Outcomes to AAVE → Merge.
+
+See [AAVE_V6_SAGA.md](./AAVE_V6_SAGA.md) for the full development history.
+
+---
+
+## Arbitrage Strategies (General)
 
 ### SPOT_SPLIT (Direction: 0)
 Borrow collateral → Split → Sell outcomes → Merge other outcomes → Swap back → Repay
@@ -88,9 +99,7 @@ Borrow collateral → Swap to other → Split → Buy outcomes → Merge → Rep
 
 ## Monitoring
 
-Both bots log to JSON files:
-- Gnosis: `logs/arbitrage-bot.json`
-- Mainnet: `logs/arb-bot-aave.json`
+Both bots log to console and can be configured to log to file.
 
 **Key metrics:**
 - Gas price at scan time
@@ -103,14 +112,14 @@ Both bots log to JSON files:
 ## Analysis Scripts
 
 ```bash
+# Debug Aave V6 (Static Call Checks)
+node scripts/debug-aave-v6-arb.js
+
 # Check Uniswap outcome pool prices/liquidity
 node scripts/check-outcome-pools.js
 
-# Check Balancer V2 repayment swap costs
+# Check Balancer costs
 node scripts/check-balancer-swap.js
-
-# Verify proposal infrastructure
-node scripts/verify-mainnet-proposal.js
 ```
 
 ---
@@ -120,11 +129,10 @@ node scripts/verify-mainnet-proposal.js
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `Insufficient funds to repay` | Slippage > profit | Reduce trade size or wait for better prices |
-| `Invalid borrow token` | Wrong token address | Use AAVE or GHO on Mainnet |
-| `Pool reverted` | Low liquidity | Try smaller amounts |
-| `GYR#357` | Balancer pool limit | Amount too large for pool |
-| `TRANSFER_FAILED` | Wrong payerIsUser flag | Use `payerIsUser=true` for Universal Router |
-| `missing revert data` | Gas too low for simulation | Use `{ gasLimit: 3000000 }` |
+| `ArbitrageFailed` | Contract logic check failed (profit < minProfit) | Normal behavior when opportunity disappears |
+| `ERC20: transfer to the zero address` | Logic bug or missing approval | Use V6 (Fixed dynamic approvals) |
+| `missing revert data` | Out of Gas (OOG) | Use `{ gasLimit: 5000000 }` in script |
+
 
 ---
 
