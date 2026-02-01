@@ -6,7 +6,7 @@ Comprehensive guide for running permissionless flash arbitrage bots on Futarchy 
 
 | Network | Contract | Address | Bot Script |
 |---------|----------|---------|------------|
-| **Gnosis Chain** | GnosisFlashArbitrageV4 | [`0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a`](https://gnosisscan.io/address/0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a) | `scripts/arb-bot.js` |
+| **Gnosis Chain** | GnosisFlashArbitrageV4 | [`0xe0545480aab67bc855806b1f64486f5c77f08ecc`](https://gnosisscan.io/address/0xe0545480aab67bc855806b1f64486f5c77f08ecc) | `scripts/arb-bot.js` |
 | **Ethereum Mainnet** | **AaveFlashArbitrageV6** | [`0xBc69Db11D5Eb837926E8f5Bb6Dd20069193919AE`](https://etherscan.io/address/0xBc69Db11D5Eb837926E8f5Bb6Dd20069193919AE) | `scripts/arb-bot-aave-v6.js` |
 | **Ethereum Mainnet** | VLRFlashArbitrageV3 | [`0xe0A988Ccb9b65036Bc7C6E307De6e5518a0F3B62`](https://etherscan.io/address/0xe0A988Ccb9b65036Bc7C6E307De6e5518a0F3B62) | `scripts/arb-bot-vlr.js` |
 
@@ -56,16 +56,44 @@ CONFIRM=true node scripts/arb-bot-vlr.js
 
 ---
 
-## Architecture Comparison
-
 | Feature | Gnosis V4 | Mainnet AAVE V6 | Mainnet VLR V3 |
 |---------|-----------|-----------------|----------------|
 | **Flash Loan** | Balancer V3 | Balancer V2 (0% fee!) | Balancer V2 (0% fee!) |
+| **Callback** | `onUnlock` | `receiveFlashLoan` | `receiveFlashLoan` |
 | **Outcome Swaps** | Algebra (Uniswap V3 fork) | Uniswap V3 (Dynamic) | Uniswap V3 (Universal) |
 | **Repayment** | Direct pools | Universal Router + Permit2 | Universal Router + Permit2 |
 | **Collaterals** | GNO / sDAI | AAVE / GHO | VLR / USDS |
 | **Pool Logic** | Auto-Discovery | **Dynamic Proposal Loading** | Hardcoded |
+| **Dust Handling** | **Auto-Returned to Caller** | Stays in contract (Admin sweep) | Stays in contract (Admin sweep) |
 | **MEV Protection** | minProfit | minProfit + Atomic Revert | minProfit + Atomic Revert |
+
+---
+
+## Technical Deep Dive: Balancer V2 vs V3 & Dust Handling
+
+This system uses two different Balancer architectures, which affects how "Dust" (leftover intermediate tokens) is handled.
+
+### Balancer V2 (Aave V6 & VLR Bots)
+*   **Mechanism**: **Push-based**. You call `flashLoan`, and the Vault PUSHES tokens to your contract, then calls `receiveFlashLoan`.
+*   **Callback Name**: MUST be `receiveFlashLoan` (hardcoded in V2 interface).
+*   **Dust Handling**: The contract logic calculates `profit = currentBalance - repayAmount`. It sends this `profit` (in the borrowed asset) to the caller.
+    *   **The Problem**: If the strategy leaves "Dust" (e.g., 0.001 YES_AAVE) due to imperfect splits/merges, this dust **stays in the contract**.
+    *   **Solution**: The `recoverTokens` admin function is used to sweep this dust periodically.
+
+### Balancer V3 (Gnosis V4 Bot)
+*   **Mechanism**: **Pull-based (Transient)**. You call `unlock`, and the Vault sets a context. It calls your custom callback (e.g., `onUnlock`). Inside, you explicitly PULL tokens via `vault.sendTo`.
+*   **Callback Name**: Flexible. We use `onUnlock`, but it can be any function selector you pass to `unlock`.
+*   **Dust Handling**: The Gnosis V4 contract was designed to be fully permissionless and cleanly.
+    *   **The Solution**: At the end of `onUnlock`, the contract explicitly iterates through ALL involved tokens (YES, NO, Collateral) and sends `balanceOf(this)` to the caller.
+    *   **Result**: Zero dust stays in the contract. The user gets everything.
+
+| Contract | Version | Callback Required? | Dust Destination |
+|:---:|:---:|:---:|:---:|
+| **Gnosis V4** | **Balancer V3** | Custom (`onUnlock`) | **User Wallet** (Clean) |
+| **Aave V6** | **Balancer V2** | Fixed (`receiveFlashLoan`) | **Contract** (Admin Sweep) |
+| **VLR V3** | **Balancer V2** | Fixed (`receiveFlashLoan`) | **Contract** (Admin Sweep) |
+
+
 
 ---
 
