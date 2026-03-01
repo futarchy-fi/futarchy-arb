@@ -1,9 +1,9 @@
 /**
- * 🤖 Automated Arbitrage Monitoring & Execution Bot
- * 
- * Strategy: Multi-amount scanning for SPOT_SPLIT and MERGE_SPOT
- * Features: Gas-aware execution, JSON logging, configurable intervals.
- * 
+ * Automated Arbitrage Bot — GIP-149 (Gnosis)
+ *
+ * Liquidity-aware: reads pool depth and sizes trades accordingly.
+ * Scans from tiny to optimal size, stops when price impact kills profit.
+ *
  * Usage: CONFIRM=true npx hardhat run scripts/arb-bot-gnosis-new.js --network gnosis
  */
 
@@ -17,184 +17,228 @@ const path = require("path");
 
 const CONFIG = {
     contractAddress: "0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a",  // V4 PERMISSIONLESS
-    proposalAddress: "0x47c80f5f701ebc5f25cab64e660f0577890729c2",  // New Gnosis GIP-149
+    proposalAddress: "0x47c80f5f701ebc5f25cab64e660f0577890729c2",  // GIP-149
 
-    // Token addresses
     tokens: {
         GNO: "0x9C58BAcC331c9aa871AFD802DB6379a98e80CEdb",
         SDAI: "0xaf204776c7245bF4147c2612BF6e5972Ee483701"
     },
 
-    // Scan Settings
-    scanIntervalMs: 10000, // 30 seconds
-    maxGnoAmount: 2.0,      // Max GNO to borrow
-    maxSdaiAmount: 500,     // Max sDAI to borrow
+    // Pool addresses (for reading liquidity)
+    yesPool: "0x5Ce6E5Bb8866B30ffbA342A9D988788A4011182F",
+    noPool: "0xd78Ea40dC62E763a41dBDAC744005192b57412E6",
+    spotPool: "0x80086B6A53249277961c8672F0C22B3f54AC85FB",
 
-    // Profit Thresholds
-    minNetProfitGno: "0.00001", // Execute if Net Profit > 0.00001 GNO
-    minNetProfitSdai: "0.00001",  // Execute if Net Profit > 0.00001 sDAI
+    scanIntervalMs: 15000,
 
-    // Gas Estimation (Average gas for these complex txs)
-    // Gas Estimation (Average gas for these complex txs)
-    estimatedGasLimit: 3500000, // Increased to 3.5M to prevent Out of Gas
+    // Profit Thresholds (in native token units)
+    minNetProfitGno: "0.000005",
+    minNetProfitSdai: "0.0005",
 
-    // Logging
+    // Trade sizing: fractions of pool GNO-side depth to test
+    // Starts tiny, increases until price impact kills profit
+    depthFractions: [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2],
+
+    estimatedGasLimit: 3500000,
     logFile: path.join(__dirname, "../logs/arbitrage-bot-gnosis-new.json")
 };
 
-// Stateless cumulative profit tracker (for console output)
+const POOL_ABI = [
+    "function globalState() view returns (uint160 price, int24 tick, uint16 fee, uint16 timepointIndex, uint8 communityFeeToken0, uint8 communityFeeToken1, bool unlocked)",
+    "function liquidity() view returns (uint128)",
+];
+
 let sessionTotalProfit = 0;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POOL DEPTH CALCULATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+function getPoolDepth(sqrtPriceX96, liquidity) {
+    // For a full-range position, compute token amounts at current price
+    // token0 (sDAI) amount ≈ L / sqrtP (in wei)
+    // token1 (GNO) amount ≈ L * sqrtP / Q96 (simplified)
+    const Q96 = 2n ** 96n;
+    const sqrtP = Number(sqrtPriceX96) / Number(Q96);
+    const L = Number(liquidity);
+
+    const token0Amount = L / sqrtP / 1e18;          // sDAI side
+    const token1Amount = L * sqrtP / 1e18;           // GNO side
+    const price = 1 / (sqrtP * sqrtP);               // sDAI per GNO
+
+    return { token0Amount, token1Amount, price, sqrtP };
+}
+
+function generateTestAmounts(gnoDepth, sdaiDepth, fractions) {
+    const gnoAmounts = [];
+    const sdaiAmounts = [];
+
+    for (const f of fractions) {
+        const gno = gnoDepth * f;
+        const sdai = sdaiDepth * f;
+        // Round to reasonable precision
+        if (gno >= 0.000001) gnoAmounts.push(gno.toFixed(8));
+        if (sdai >= 0.0001) sdaiAmounts.push(sdai.toFixed(6));
+    }
+
+    return { gnoAmounts, sdaiAmounts };
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BOT LOGIC
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function main() {
-    console.log("\n🤖 ARBITRAGE BOT STARTED");
+    console.log("\n ARBITRAGE BOT STARTED (liquidity-aware)");
     console.log("=".repeat(60));
 
     const [signer] = await ethers.getSigners();
     const contract = await ethers.getContractAt("GnosisFlashArbitrageV4", CONFIG.contractAddress, signer);
 
-    // Create logs directory if it doesn't exist
     const logsDir = path.dirname(CONFIG.logFile);
     if (!fs.existsSync(logsDir)) {
-        fs.mkdirSync(logsDir);
+        fs.mkdirSync(logsDir, { recursive: true });
     }
 
-    console.log(`👤 Signer: ${signer.address}`);
-    console.log(`📊 Monitoring interval: ${CONFIG.scanIntervalMs / 1000}s`);
-    console.log(`📝 Log file: ${CONFIG.logFile}`);
+    console.log(`Signer: ${signer.address}`);
+    console.log(`Interval: ${CONFIG.scanIntervalMs / 1000}s`);
+    console.log(`Log: ${CONFIG.logFile}`);
 
     while (true) {
         try {
             await runScanCycle(contract, signer);
         } catch (error) {
-            console.error("\n❌ Error in scan cycle:", error.message);
+            console.error("\n Error in scan cycle:", error.message);
         }
 
-        console.log(`\n⏳ Waiting ${CONFIG.scanIntervalMs / 1000}s for next scan...`);
         await new Promise(resolve => setTimeout(resolve, CONFIG.scanIntervalMs));
     }
 }
 
 async function runScanCycle(contract, signer) {
     const timestamp = new Date().toISOString();
-    console.log(`\n🔍 SCAN START: ${timestamp}`);
+    console.log(`\n--- SCAN: ${timestamp} ---`);
+
+    // 1. Read pool states
+    const yesPool = new ethers.Contract(CONFIG.yesPool, POOL_ABI, signer);
+    const noPool = new ethers.Contract(CONFIG.noPool, POOL_ABI, signer);
+    const spotPool = new ethers.Contract(CONFIG.spotPool, POOL_ABI, signer);
+
+    const [yesGs, noGs, spotGs, yesLiq, noLiq] = await Promise.all([
+        yesPool.globalState(),
+        noPool.globalState(),
+        spotPool.globalState(),
+        yesPool.liquidity(),
+        noPool.liquidity(),
+    ]);
+
+    // Use the smaller pool's liquidity (bottleneck)
+    const minLiq = yesLiq < noLiq ? yesLiq : noLiq;
+    const minSqrtPrice = yesLiq < noLiq ? yesGs[0] : noGs[0];
+
+    const depth = getPoolDepth(minSqrtPrice, minLiq);
+
+    // Prices: YES/NO pool token0=sDAI, token1=GNO → sqrtP^2 = GNO/sDAI → invert
+    const yesSdaiPerGno = 1 / (Number(yesGs[0]) / Number(2n ** 96n)) ** 2;
+    const noSdaiPerGno = 1 / (Number(noGs[0]) / Number(2n ** 96n)) ** 2;
+    // Spot pool: token0=GNO, token1=sDAI → sqrtP^2 = sDAI/GNO directly
+    const spotSdaiPerGno = (Number(spotGs[0]) / Number(2n ** 96n)) ** 2;
+
+    const divergence = (yesSdaiPerGno / spotSdaiPerGno - 1) * 100;
 
     const gasPrice = await ethers.provider.getFeeData();
     const gasPriceGwei = ethers.formatUnits(gasPrice.gasPrice, "gwei");
-    console.log(`⛽ Gas Price: ${parseFloat(gasPriceGwei).toFixed(2)} Gwei`);
 
-    // GNO price for gas estimation conversion (approximate)
-    const gnoSdaiPrice = await getGnoPrice();
+    console.log(`  Gas: ${parseFloat(gasPriceGwei).toFixed(2)} Gwei`);
+    console.log(`  Prices: YES=${yesSdaiPerGno.toFixed(2)} NO=${noSdaiPerGno.toFixed(2)} SPOT=${spotSdaiPerGno.toFixed(2)} sDAI/GNO`);
+    console.log(`  Divergence: ${divergence >= 0 ? '+' : ''}${divergence.toFixed(2)}%`);
+    console.log(`  Pool depth: ${depth.token1Amount.toFixed(4)} GNO + ${depth.token0Amount.toFixed(2)} sDAI ($${((depth.token0Amount + depth.token1Amount * spotSdaiPerGno) * 1.228).toFixed(0)})`);
 
-    // Multi-amount test for GNO (SPOT_SPLIT)
-    // Updated based on successful check-opportunities (0.01 - 0.5 range)
-    const gnoAmounts = ["0.01", "0.05", "0.1", "0.2", "0.5"];
+    // 2. Generate liquidity-aware test amounts
+    const { gnoAmounts, sdaiAmounts } = generateTestAmounts(
+        depth.token1Amount, depth.token0Amount, CONFIG.depthFractions
+    );
+
+    console.log(`  Test sizes (GNO): [${gnoAmounts.map(a => parseFloat(a).toFixed(6)).join(', ')}]`);
+
+    // 3. Test SPOT_SPLIT (profitable when conditional > spot)
     let bestArb = null;
-
-    console.log("   📊 Testing SPOT_SPLIT (GNO)...");
-    for (let i = 0; i < gnoAmounts.length; i++) {
-        const amt = gnoAmounts[i];
-        const arb = await simulateArbitrage(contract, CONFIG.tokens.GNO, amt, 0); // 0 = SPOT_SPLIT
-        if (arb && arb.success) {
-            const netProfit = calculateNetProfit(arb.profit, gasPrice.gasPrice, gnoSdaiPrice);
-            console.log(`      ✅ GNO ${amt}: profit=${arb.profit.toFixed(6)} GNO, net=${netProfit.toFixed(6)} GNO`);
-            if (!bestArb || netProfit > bestArb.netProfit) {
-                bestArb = { ...arb, netProfit, strategy: "SPOT_SPLIT", borrowToken: "GNO", profitUnit: "GNO" };
+    if (divergence > 0.1) {
+        console.log(`  SPOT_SPLIT (cond > spot by ${divergence.toFixed(2)}%):`);
+        for (let i = 0; i < gnoAmounts.length; i++) {
+            const amt = gnoAmounts[i];
+            const arb = await simulateArbitrage(contract, CONFIG.tokens.GNO, amt, 0);
+            if (arb && arb.success) {
+                const netProfit = calculateNetProfit(arb.profit, gasPrice.gasPrice, spotSdaiPerGno);
+                const pctReturn = (arb.profit / parseFloat(amt) * 100).toFixed(3);
+                console.log(`    ${amt} GNO: profit=${arb.profit.toFixed(8)} (${pctReturn}%), net=${netProfit.toFixed(8)}`);
+                if (!bestArb || netProfit > bestArb.netProfit) {
+                    bestArb = { ...arb, netProfit, strategy: "SPOT_SPLIT", borrowToken: "GNO", profitUnit: "GNO" };
+                }
+            } else if (arb && arb.error) {
+                console.log(`    ${amt} GNO: ${arb.error}`);
+                if (arb.error === "reverted" && i > 0) break; // Bigger will also fail
             }
-        } else if (arb && arb.error) {
-            console.log(`      ❌ GNO ${amt}: ${arb.error}`);
-            // Early exit: larger amounts will also fail
-            const skipped = gnoAmounts.length - i - 1;
-            if (skipped > 0) console.log(`      ⏭️  Skipping ${skipped} larger amounts`);
-            break;
-        } else {
-            console.log(`      ⚪ GNO ${amt}: no profit`);
         }
+    } else {
+        console.log(`  SPOT_SPLIT: skipped (divergence ${divergence.toFixed(2)}% too low)`);
     }
 
-    // Multi-amount test for sDAI (MERGE_SPOT)
-    const sdaiAmounts = ["0.1", "0.5", "1", "2", "5", "10", "50", "100", "200", "500"];
+    // 4. Test MERGE_SPOT (profitable when spot > conditional)
     let bestSdaiArb = null;
-
-    console.log("   📊 Testing MERGE_SPOT (sDAI)...");
-    for (let i = 0; i < sdaiAmounts.length; i++) {
-        const amt = sdaiAmounts[i];
-        const arb = await simulateArbitrage(contract, CONFIG.tokens.SDAI, amt, 1); // 1 = MERGE_SPOT
-        if (arb && arb.success) {
-            // sDAI profit stays in sDAI units
-            const gasCostSdai = calculateGasCostInSdai(gasPrice.gasPrice, gnoSdaiPrice);
-            const netProfitSdai = arb.profit - gasCostSdai;
-            console.log(`      ✅ sDAI ${amt}: profit=${arb.profit.toFixed(4)} sDAI, gas≈${gasCostSdai.toFixed(4)} sDAI, net=${netProfitSdai.toFixed(4)} sDAI`);
-            if (!bestSdaiArb || netProfitSdai > bestSdaiArb.netProfitSdai) {
-                bestSdaiArb = { ...arb, netProfitSdai, strategy: "MERGE_SPOT", borrowToken: "SDAI", profitUnit: "sDAI" };
+    if (divergence < -0.1) {
+        console.log(`  MERGE_SPOT (spot > cond by ${(-divergence).toFixed(2)}%):`);
+        for (let i = 0; i < sdaiAmounts.length; i++) {
+            const amt = sdaiAmounts[i];
+            const arb = await simulateArbitrage(contract, CONFIG.tokens.SDAI, amt, 1);
+            if (arb && arb.success) {
+                const gasCostSdai = calculateGasCostInSdai(gasPrice.gasPrice, spotSdaiPerGno);
+                const netProfitSdai = arb.profit - gasCostSdai;
+                const pctReturn = (arb.profit / parseFloat(amt) * 100).toFixed(3);
+                console.log(`    ${amt} sDAI: profit=${arb.profit.toFixed(6)} (${pctReturn}%), net=${netProfitSdai.toFixed(6)}`);
+                if (!bestSdaiArb || netProfitSdai > bestSdaiArb.netProfitSdai) {
+                    bestSdaiArb = { ...arb, netProfitSdai, strategy: "MERGE_SPOT", borrowToken: "SDAI", profitUnit: "sDAI" };
+                }
+            } else if (arb && arb.error) {
+                console.log(`    ${amt} sDAI: ${arb.error}`);
+                if (arb.error === "reverted" && i > 0) break;
             }
-        } else if (arb && arb.error) {
-            console.log(`      ❌ sDAI ${amt}: ${arb.error}`);
-            // Early exit: larger amounts will also fail
-            const skipped = sdaiAmounts.length - i - 1;
-            if (skipped > 0) console.log(`      ⏭️  Skipping ${skipped} larger amounts`);
-            break;
-        } else {
-            console.log(`      ⚪ sDAI ${amt}: no profit`);
         }
-    }
-
-    // Report and Execute - check BOTH strategies
-    console.log("\n   📋 SUMMARY:");
-
-    // Check GNO strategy
-    if (bestArb && bestArb.netProfit > parseFloat(CONFIG.minNetProfitGno)) {
-        console.log(`   🎯 GNO TARGET: ${bestArb.amount} GNO → net ${bestArb.netProfit.toFixed(6)} GNO ✓`);
-    } else if (bestArb) {
-        console.log(`   ⚪ GNO best: ${bestArb.netProfit.toFixed(6)} GNO (threshold: ${CONFIG.minNetProfitGno})`);
     } else {
-        console.log(`   ⚪ GNO: no profitable opportunities`);
+        console.log(`  MERGE_SPOT: skipped (divergence ${divergence.toFixed(2)}% wrong direction)`);
     }
 
-    // Check sDAI strategy
-    if (bestSdaiArb && bestSdaiArb.netProfitSdai > parseFloat(CONFIG.minNetProfitSdai)) {
-        console.log(`   🎯 sDAI TARGET: ${bestSdaiArb.amount} sDAI → net ${bestSdaiArb.netProfitSdai.toFixed(4)} sDAI ✓`);
-    } else if (bestSdaiArb) {
-        console.log(`   ⚪ sDAI best: ${bestSdaiArb.netProfitSdai.toFixed(4)} sDAI (threshold: ${CONFIG.minNetProfitSdai})`);
-    } else {
-        console.log(`   ⚪ sDAI: no profitable opportunities`);
-    }
-
-    // Execute best opportunity
+    // 5. Execute best
     const executeGno = bestArb && bestArb.netProfit > parseFloat(CONFIG.minNetProfitGno);
     const executeSdai = bestSdaiArb && bestSdaiArb.netProfitSdai > parseFloat(CONFIG.minNetProfitSdai);
 
     if (executeGno || executeSdai) {
-        // Pick the more profitable one (convert to common unit - GNO)
+        const sdaiValueInGno = executeSdai ? bestSdaiArb.netProfitSdai / spotSdaiPerGno : 0;
         const gnoValue = executeGno ? bestArb.netProfit : 0;
-        const sdaiValueInGno = executeSdai ? bestSdaiArb.netProfitSdai / gnoSdaiPrice : 0;
-
         const selected = gnoValue >= sdaiValueInGno ? bestArb : bestSdaiArb;
         const unit = gnoValue >= sdaiValueInGno ? "GNO" : "sDAI";
         const netVal = gnoValue >= sdaiValueInGno ? bestArb.netProfit : bestSdaiArb.netProfitSdai;
 
-        console.log(`\n🔥 EXECUTING: ${selected.strategy} with ${selected.amount} ${selected.borrowToken}`);
-        console.log(`   Net Profit: ${netVal.toFixed(6)} ${unit}`);
+        console.log(`  >> EXECUTE: ${selected.strategy} ${selected.amount} ${selected.borrowToken} → net ${netVal.toFixed(8)} ${unit}`);
 
         if (process.env.CONFIRM === "true") {
             await executeTrade(contract, selected);
         } else {
-            console.log("   ⚠️  DRY RUN: Set CONFIRM=true to execute.");
+            console.log("  >> DRY RUN (set CONFIRM=true)");
         }
     } else {
-        console.log("\n   📉 No opportunities above thresholds");
+        console.log(`  >> No profitable opportunity (need more liquidity or divergence)`);
     }
 
-    console.log(`\n💰 SESSION TOTAL: ${sessionTotalProfit.toFixed(6)} GNO`);
+    console.log(`  Session total: ${sessionTotalProfit.toFixed(6)} GNO`);
 
-    // Log the scan result
     logEvent({
         type: "scan",
         timestamp,
         gasPrice: gasPriceGwei,
+        divergence: divergence.toFixed(2),
+        poolDepthGno: depth.token1Amount.toFixed(4),
+        poolDepthSdai: depth.token0Amount.toFixed(2),
         bestOpportunity: bestArb ? {
             strategy: bestArb.strategy,
             amount: bestArb.amount,
@@ -212,7 +256,7 @@ async function simulateArbitrage(contract, token, amountStr, direction) {
             token,
             amount,
             direction,
-            0 // minProfit = 0 for simulation
+            0
         );
         return {
             success: true,
@@ -220,7 +264,6 @@ async function simulateArbitrage(contract, token, amountStr, direction) {
             profit: parseFloat(ethers.formatEther(result.profit))
         };
     } catch (e) {
-        // Extract short error message
         const errorMsg = e.message?.includes("reverted") ? "reverted" :
             e.message?.includes("BAD_DATA") ? "BAD_DATA" :
                 e.message?.slice(0, 30) || "unknown";
@@ -237,25 +280,24 @@ function calculateNetProfit(grossProfitGno, gasPriceWei, gnoPriceSdai) {
 function calculateGasCostInSdai(gasPriceWei, gnoPriceSdai) {
     const gasCostWei = gasPriceWei * BigInt(CONFIG.estimatedGasLimit);
     const gasCostGno = parseFloat(ethers.formatEther(gasCostWei));
-    return gasCostGno * gnoPriceSdai; // Convert GNO gas cost to sDAI
+    return gasCostGno * gnoPriceSdai;
 }
 
 async function executeTrade(contract, arb) {
-    console.log("\n🔥 EXECUTING ACTUAL TRADE...");
+    console.log("  >> EXECUTING TRADE...");
     try {
         const tx = await contract.executeArbitrage(
             CONFIG.proposalAddress,
             arb.borrowToken === "GNO" ? CONFIG.tokens.GNO : CONFIG.tokens.SDAI,
             ethers.parseEther(arb.amount),
             arb.strategy === "SPOT_SPLIT" ? 0 : 1,
-            0, // minProfit = 0 (same as simulation)
+            0,
             { gasLimit: CONFIG.estimatedGasLimit }
         );
 
-        console.log(`📝 TX Published: ${tx.hash}`);
+        console.log(`  TX: ${tx.hash}`);
         const receipt = await tx.wait();
-
-        console.log(`✅ TRADE MINED! Status: ${receipt.status === 1 ? "SUCCESS" : "FAIL"}`);
+        console.log(`  Status: ${receipt.status === 1 ? "SUCCESS" : "FAIL"}`);
 
         if (receipt.status === 1) {
             sessionTotalProfit += arb.profit;
@@ -273,14 +315,8 @@ async function executeTrade(contract, arb) {
             sessionTotal: sessionTotalProfit
         });
     } catch (error) {
-        console.error("❌ Execution Error:", error.message);
+        console.error("  Execution Error:", error.message.slice(0, 200));
     }
-}
-
-// Simple GNO price fetch (approximate from Balancer V3 spot calculation logic)
-async function getGnoPrice() {
-    // For simplicity, we assume ~112 sDAI/GNO for gas conversion if oracle fails
-    return 112.0;
 }
 
 function logEvent(event) {
