@@ -44,6 +44,11 @@ const CONFIG = {
     logFile: path.join(__dirname, "../logs/arb-bot-pnk.json"),
 };
 
+const EXPLORER_BY_CHAIN_ID = {
+    100: "https://gnosisscan.io/tx/",
+    10200: "https://gnosis-chiado.blockscout.com/tx/",
+};
+
 
 const POOL_ABI = [
     "function token0() view returns (address)",
@@ -181,6 +186,17 @@ function buildWethTestSizes(maxBorrowWeth, fractions, minSize = 0.0001) {
     return [...new Set(out)]
         .filter(a => parseFloat(a) > 0)
         .sort((a, b) => parseFloat(a) - parseFloat(b));
+}
+
+async function getTxExplorerUrl(txHash) {
+    const chainId = (await ethers.provider.getNetwork()).chainId;
+    const baseUrl = EXPLORER_BY_CHAIN_ID[chainId.toString()];
+
+    if (baseUrl) {
+        return `${baseUrl}${txHash}`;
+    }
+
+    return `chain:${chainId} tx:${txHash}`;
 }
 
 async function getLiquidityAwareAmounts(contract, signer, proposalInfo, tokenInfo) {
@@ -452,6 +468,9 @@ async function executeTrade(contract, arb) {
     console.log("\n  EXECUTING TRADE...");
     try {
         const direction = arb.strategy === "SPOT_SPLIT" ? 0 : 1;
+        console.log(`  Strategy: ${arb.strategy}`);
+        console.log(`  Amount: ${arb.amount} WETH`);
+        console.log("  Submitting transaction...");
         const tx = await contract.executeArbitrage(
             CONFIG.proposalAddress,
             ethers.parseEther(arb.amount),
@@ -460,10 +479,24 @@ async function executeTrade(contract, arb) {
             { gasLimit: CONFIG.estimatedGasLimit }
         );
 
-        console.log(`  TX: ${tx.hash}`);
+        const explorerUrl = await getTxExplorerUrl(tx.hash);
+        console.log(`  TX submitted: ${tx.hash}`);
+        console.log(`  Explorer: ${explorerUrl}`);
+        console.log("  Waiting for confirmation...");
+
         const receipt = await tx.wait();
         const status = receipt.status === 1 ? "SUCCESS" : "FAIL";
-        console.log(`  Mined: ${status}, gas used: ${receipt.gasUsed.toString()}`);
+        const block = receipt.blockNumber ? receipt.blockNumber.toString() : "n/a";
+        const latestBlock = await ethers.provider.getBlockNumber();
+        const confirmations = receipt.blockNumber ? (Number(latestBlock) - Number(receipt.blockNumber) + 1) : "n/a";
+
+        console.log(`  Confirmed: ${status}`);
+        console.log(`  Block: ${block}`);
+        console.log(`  Confirmations: ${confirmations}`);
+        console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
+        if (receipt.effectiveGasPrice) {
+            console.log(`  Effective gas price: ${ethers.formatUnits(receipt.effectiveGasPrice, "gwei")} gwei`);
+        }
 
         if (receipt.status === 1) {
             sessionTotalProfit += arb.profit;
@@ -478,6 +511,9 @@ async function executeTrade(contract, arb) {
             gasUsed: receipt.gasUsed.toString(),
             strategy: arb.strategy,
             amount: arb.amount,
+            txUrl: explorerUrl,
+            blockNumber: block,
+            confirmations,
             sessionTotal: sessionTotalProfit,
         });
     } catch (error) {
