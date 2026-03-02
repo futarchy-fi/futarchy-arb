@@ -426,8 +426,10 @@ async function runScanCycle(contract, signer, proposalInfo, pnkToken, sdaiToken)
     const selected = candidates[0];
 
     console.log(`  TARGET: ${selected.strategy} ${selected.amount} WETH -> profit ${selected.profit.toFixed(6)} WETH`);
+    console.log(`  CONFIRM mode: ${process.env.CONFIRM === "true" ? "ENABLED (LIVE)" : "DISABLED (DRY RUN)"}`);
 
     if (process.env.CONFIRM === "true") {
+        console.log("  Sending selected trade on-chain...");
         await executeTrade(contract, selected);
     } else {
         console.log("  DRY RUN: Set CONFIRM=true to execute.");
