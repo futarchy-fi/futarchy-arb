@@ -16,7 +16,7 @@ const path = require("path");
 // ═══════════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-    contractAddress: "0x0ECD7369cFe4CD2f35b47B3c66e32AaC2016B25a",  // V4 PERMISSIONLESS
+    contractAddress: "0x59D327033035E16cEB95cd554D26886B59E4086e",  // V5 direct spot pool
     proposalAddress: "0x47c80f5f701ebc5f25cab64e660f0577890729c2",  // GIP-149
 
     tokens: {
@@ -116,7 +116,7 @@ async function main() {
     console.log("=".repeat(60));
 
     const [signer] = await ethers.getSigners();
-    const contract = await ethers.getContractAt("GnosisFlashArbitrageV4", CONFIG.contractAddress, signer);
+    const contract = await ethers.getContractAt("GnosisFlashArbitrageV5", CONFIG.contractAddress, signer);
 
     const logsDir = path.dirname(CONFIG.logFile);
     if (!fs.existsSync(logsDir)) {
