@@ -31,7 +31,7 @@ const CONFIG = {
 
     scanIntervalMs: 15000,
 
-    // Profit Thresholds (in native token units)
+    // Profit thresholds (gross — gas is negligible on Gnosis)
     minNetProfitGno: "0.000005",
     minNetProfitSdai: "0.0005",
 
@@ -146,10 +146,6 @@ async function runScanCycle(contract, signer) {
 
     const divergence = (yesSdaiPerGno / spotSdaiPerGno - 1) * 100;
 
-    const gasPrice = await ethers.provider.getFeeData();
-    const gasPriceGwei = ethers.formatUnits(gasPrice.gasPrice, "gwei");
-
-    console.log(`  Gas: ${parseFloat(gasPriceGwei).toFixed(2)} Gwei`);
     console.log(`  Prices: YES=${yesSdaiPerGno.toFixed(2)} NO=${noSdaiPerGno.toFixed(2)} SPOT=${spotSdaiPerGno.toFixed(2)} sDAI/GNO`);
     console.log(`  Divergence: ${divergence >= 0 ? '+' : ''}${divergence.toFixed(2)}%`);
     console.log(`  Pool depth: ${depth.token1Amount.toFixed(4)} GNO + ${depth.token0Amount.toFixed(2)} sDAI ($${((depth.token0Amount + depth.token1Amount * spotSdaiPerGno) * 1.228).toFixed(0)})`);
@@ -162,6 +158,7 @@ async function runScanCycle(contract, signer) {
     console.log(`  Test sizes (GNO): [${gnoAmounts.map(a => parseFloat(a).toFixed(6)).join(', ')}]`);
 
     // 3. Test SPOT_SPLIT (profitable when conditional > spot)
+    // Gnosis chain: gas is xDAI (pennies), so we use gross profit directly
     let bestArb = null;
     if (divergence > 0.1) {
         console.log(`  SPOT_SPLIT (cond > spot by ${divergence.toFixed(2)}%):`);
@@ -169,15 +166,14 @@ async function runScanCycle(contract, signer) {
             const amt = gnoAmounts[i];
             const arb = await simulateArbitrage(contract, CONFIG.tokens.GNO, amt, 0);
             if (arb && arb.success) {
-                const netProfit = calculateNetProfit(arb.profit, gasPrice.gasPrice, spotSdaiPerGno);
                 const pctReturn = (arb.profit / parseFloat(amt) * 100).toFixed(3);
-                console.log(`    ${amt} GNO: profit=${arb.profit.toFixed(8)} (${pctReturn}%), net=${netProfit.toFixed(8)}`);
-                if (!bestArb || netProfit > bestArb.netProfit) {
-                    bestArb = { ...arb, netProfit, strategy: "SPOT_SPLIT", borrowToken: "GNO", profitUnit: "GNO" };
+                console.log(`    ${amt} GNO: profit=${arb.profit.toFixed(8)} GNO (${pctReturn}%)`);
+                if (!bestArb || arb.profit > bestArb.profit) {
+                    bestArb = { ...arb, strategy: "SPOT_SPLIT", borrowToken: "GNO", profitUnit: "GNO" };
                 }
             } else if (arb && arb.error) {
                 console.log(`    ${amt} GNO: ${arb.error}`);
-                if (arb.error === "reverted" && i > 0) break; // Bigger will also fail
+                if (arb.error === "reverted" && i > 0) break;
             }
         }
     } else {
@@ -192,12 +188,10 @@ async function runScanCycle(contract, signer) {
             const amt = sdaiAmounts[i];
             const arb = await simulateArbitrage(contract, CONFIG.tokens.SDAI, amt, 1);
             if (arb && arb.success) {
-                const gasCostSdai = calculateGasCostInSdai(gasPrice.gasPrice, spotSdaiPerGno);
-                const netProfitSdai = arb.profit - gasCostSdai;
                 const pctReturn = (arb.profit / parseFloat(amt) * 100).toFixed(3);
-                console.log(`    ${amt} sDAI: profit=${arb.profit.toFixed(6)} (${pctReturn}%), net=${netProfitSdai.toFixed(6)}`);
-                if (!bestSdaiArb || netProfitSdai > bestSdaiArb.netProfitSdai) {
-                    bestSdaiArb = { ...arb, netProfitSdai, strategy: "MERGE_SPOT", borrowToken: "SDAI", profitUnit: "sDAI" };
+                console.log(`    ${amt} sDAI: profit=${arb.profit.toFixed(6)} sDAI (${pctReturn}%)`);
+                if (!bestSdaiArb || arb.profit > bestSdaiArb.profit) {
+                    bestSdaiArb = { ...arb, strategy: "MERGE_SPOT", borrowToken: "SDAI", profitUnit: "sDAI" };
                 }
             } else if (arb && arb.error) {
                 console.log(`    ${amt} sDAI: ${arb.error}`);
@@ -208,18 +202,18 @@ async function runScanCycle(contract, signer) {
         console.log(`  MERGE_SPOT: skipped (divergence ${divergence.toFixed(2)}% wrong direction)`);
     }
 
-    // 5. Execute best
-    const executeGno = bestArb && bestArb.netProfit > parseFloat(CONFIG.minNetProfitGno);
-    const executeSdai = bestSdaiArb && bestSdaiArb.netProfitSdai > parseFloat(CONFIG.minNetProfitSdai);
+    // 5. Execute best (ignore gas — Gnosis gas is pennies in xDAI)
+    const executeGno = bestArb && bestArb.profit > parseFloat(CONFIG.minNetProfitGno);
+    const executeSdai = bestSdaiArb && bestSdaiArb.profit > parseFloat(CONFIG.minNetProfitSdai);
 
     if (executeGno || executeSdai) {
-        const sdaiValueInGno = executeSdai ? bestSdaiArb.netProfitSdai / spotSdaiPerGno : 0;
-        const gnoValue = executeGno ? bestArb.netProfit : 0;
+        const sdaiValueInGno = executeSdai ? bestSdaiArb.profit / spotSdaiPerGno : 0;
+        const gnoValue = executeGno ? bestArb.profit : 0;
         const selected = gnoValue >= sdaiValueInGno ? bestArb : bestSdaiArb;
         const unit = gnoValue >= sdaiValueInGno ? "GNO" : "sDAI";
-        const netVal = gnoValue >= sdaiValueInGno ? bestArb.netProfit : bestSdaiArb.netProfitSdai;
+        const profitVal = gnoValue >= sdaiValueInGno ? bestArb.profit : bestSdaiArb.profit;
 
-        console.log(`  >> EXECUTE: ${selected.strategy} ${selected.amount} ${selected.borrowToken} → net ${netVal.toFixed(8)} ${unit}`);
+        console.log(`  >> EXECUTE: ${selected.strategy} ${selected.amount} ${selected.borrowToken} → profit ${profitVal.toFixed(8)} ${unit}`);
 
         if (process.env.CONFIRM === "true") {
             await executeTrade(contract, selected);
@@ -271,21 +265,6 @@ async function simulateArbitrage(contract, token, amountStr, direction) {
     }
 }
 
-function calculateNetProfit(grossProfitGno, gasPriceWei, gnoPriceSdai) {
-    // Gnosis chain: gas is paid in xDAI (native token), ~1 USD
-    // gnoPriceSdai ≈ sDAI/GNO ≈ USD/GNO
-    const gasCostWei = gasPriceWei * BigInt(CONFIG.estimatedGasLimit);
-    const gasCostXdai = parseFloat(ethers.formatEther(gasCostWei));  // xDAI ≈ $1
-    const gasCostGno = gasCostXdai / gnoPriceSdai;                   // convert to GNO
-    return grossProfitGno - gasCostGno;
-}
-
-function calculateGasCostInSdai(gasPriceWei, gnoPriceSdai) {
-    // Gnosis chain: gas in xDAI ≈ sDAI ≈ $1
-    const gasCostWei = gasPriceWei * BigInt(CONFIG.estimatedGasLimit);
-    const gasCostSdai = parseFloat(ethers.formatEther(gasCostWei));   // xDAI ≈ sDAI
-    return gasCostSdai;
-}
 
 async function executeTrade(contract, arb) {
     console.log("  >> EXECUTING TRADE...");
