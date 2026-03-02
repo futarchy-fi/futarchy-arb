@@ -53,6 +53,10 @@ const POOL_ABI = [
     "function liquidity() view returns (uint128)",
 ];
 
+const ARB_FAILED_IFACE = new ethers.Interface([
+    "error ArbitrageFailed(uint256 balanceAfter, uint256 borrowAmount, string reason)"
+]);
+
 let sessionTotalProfit = 0;
 
 function sleep(ms) {
@@ -192,7 +196,7 @@ async function runScanCycle(contract, signer) {
                 }
             } else if (arb && arb.error) {
                 console.log(`    ${amt} GNO: ${arb.error}`);
-                if (arb.error === "reverted" && i > 0) break;
+                if ((arb.error === "reverted" || arb.error.startsWith("ArbitrageFailed:")) && i > 0) break;
             }
         }
     } else {
@@ -214,7 +218,7 @@ async function runScanCycle(contract, signer) {
                 }
             } else if (arb && arb.error) {
                 console.log(`    ${amt} sDAI: ${arb.error}`);
-                if (arb.error === "reverted" && i > 0) break;
+                if ((arb.error === "reverted" || arb.error.startsWith("ArbitrageFailed:")) && i > 0) break;
             }
         }
     } else {
@@ -233,11 +237,13 @@ async function runScanCycle(contract, signer) {
         const profitVal = gnoValue >= sdaiValueInGno ? bestArb.profit : bestSdaiArb.profit;
 
         console.log(`  >> EXECUTE: ${selected.strategy} ${selected.amount} ${selected.borrowToken} → profit ${profitVal.toFixed(8)} ${unit}`);
+        console.log(`  >> CONFIRM mode: ${process.env.CONFIRM === "true" ? "ENABLED (LIVE)" : "DISABLED (DRY RUN)"}`);
 
         if (process.env.CONFIRM === "true") {
+            console.log("  >> Sending selected trade on-chain...");
             await executeTrade(contract, selected);
         } else {
-            console.log("  >> DRY RUN (set CONFIRM=true)");
+            console.log("  >> DRY RUN: Set CONFIRM=true to execute.");
         }
     } else {
         console.log(`  >> No profitable opportunity (need more liquidity or divergence)`);
@@ -277,18 +283,34 @@ async function simulateArbitrage(contract, token, amountStr, direction) {
             profit: parseFloat(ethers.formatEther(result.profit))
         };
     } catch (e) {
+        // Try to decode ArbitrageFailed custom error
+        const revertData = e.data || e.error?.data;
+        if (revertData && revertData !== "0x") {
+            try {
+                const decoded = ARB_FAILED_IFACE.parseError(revertData);
+                const balanceAfter = ethers.formatEther(decoded.args[0]);
+                const borrowAmount = ethers.formatEther(decoded.args[1]);
+                const reason = decoded.args[2];
+                const delta = ethers.formatEther(decoded.args[0] - decoded.args[1]);
+                return {
+                    success: false,
+                    error: `ArbitrageFailed: ${reason} (balance=${balanceAfter}, borrow=${borrowAmount}, delta=${delta})`
+                };
+            } catch (_) { /* not this error selector, fall through */ }
+        }
         const errorMsg = e.message?.includes("reverted") ? "reverted" :
             e.message?.includes("BAD_DATA") ? "BAD_DATA" :
-                e.message?.slice(0, 30) || "unknown";
+                e.message?.slice(0, 60) || "unknown";
         return { success: false, error: errorMsg };
     }
 }
 
-
 async function executeTrade(contract, arb) {
-    console.log("  >> EXECUTING TRADE...");
+    console.log("\n  >> EXECUTING TRADE...");
+    console.log(`  Strategy: ${arb.strategy}`);
+    console.log(`  Amount: ${arb.amount} ${arb.borrowToken}`);
+    console.log("  Submitting transaction...");
     try {
-        console.log("  Submitting transaction...");
         const tx = await contract.executeArbitrage(
             CONFIG.proposalAddress,
             arb.borrowToken === "GNO" ? CONFIG.tokens.GNO : CONFIG.tokens.SDAI,
@@ -342,7 +364,8 @@ async function executeTrade(contract, arb) {
 
         const latestBlock = await ethers.provider.getBlockNumber();
         const confirmations = receipt.blockNumber ? Number(latestBlock - receipt.blockNumber + 1) : 0;
-        console.log(`  Status: ${receipt.status === 1 ? "SUCCESS" : "FAIL"}`);
+        const status = receipt.status === 1 ? "SUCCESS" : "FAIL";
+        console.log(`  Status: ${status}`);
         console.log(`  Block: ${receipt.blockNumber}`);
         console.log(`  Confirmations: ${confirmations}`);
         console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
@@ -358,7 +381,7 @@ async function executeTrade(contract, arb) {
             type: "trade",
             timestamp: new Date().toISOString(),
             txHash: tx.hash,
-            status: receipt.status === 1 ? "success" : "failed",
+            status: status.toLowerCase(),
             profit: arb.profit,
             gasUsed: receipt.gasUsed.toString(),
             strategy: arb.strategy,
@@ -369,7 +392,7 @@ async function executeTrade(contract, arb) {
             sessionTotal: sessionTotalProfit
         });
     } catch (error) {
-        console.error("  Execution Error:", error.message.slice(0, 200));
+        console.error("  Execution error:", error.message?.slice(0, 200));
         logEvent({
             type: "trade_error",
             timestamp: new Date().toISOString(),
