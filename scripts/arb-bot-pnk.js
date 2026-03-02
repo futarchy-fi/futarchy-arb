@@ -32,7 +32,7 @@ const CONFIG = {
     wethAmounts: ["0.0001", "0.0002", "0.0005", "0.001", "0.002", "0.005", "0.01", "0.05", "0.1", "0.2", "0.5"],
 
     // Minimum net profit in WETH to execute
-    minNetProfitWeth: "0.0001",
+    minNetProfitWeth: process.env.PNK_MIN_NET_PROFIT_WETH || "0",
 
     // Trade sizes as a fraction of observed pool depth (bottleneck side)
     depthFractions: [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2],
