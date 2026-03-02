@@ -229,7 +229,7 @@ async function runScanCycle(contract, signer) {
     logEvent({
         type: "scan",
         timestamp,
-        gasPrice: gasPriceGwei,
+        gasPrice: "n/a",
         divergence: divergence.toFixed(2),
         poolDepthGno: depth.token1Amount.toFixed(4),
         poolDepthSdai: depth.token0Amount.toFixed(2),
