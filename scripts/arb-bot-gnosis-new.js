@@ -43,12 +43,31 @@ const CONFIG = {
     logFile: path.join(__dirname, "../logs/arbitrage-bot-gnosis-new.json")
 };
 
+const EXPLORER_BY_CHAIN_ID = {
+    100: "https://gnosisscan.io/tx/",
+    10200: "https://gnosis-chiado.blockscout.com/tx/",
+};
+
 const POOL_ABI = [
     "function globalState() view returns (uint160 price, int24 tick, uint16 fee, uint16 timepointIndex, uint8 communityFeeToken0, uint8 communityFeeToken1, bool unlocked)",
     "function liquidity() view returns (uint128)",
 ];
 
 let sessionTotalProfit = 0;
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function getTxExplorerUrl(txHash) {
+    const network = await ethers.provider.getNetwork();
+    const chainId = network.chainId.toString();
+    const base = EXPLORER_BY_CHAIN_ID[chainId];
+    if (base) {
+        return `${base}${txHash}`;
+    }
+    return `chain:${chainId} tx:${txHash}`;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // POOL DEPTH CALCULATION
@@ -269,6 +288,7 @@ async function simulateArbitrage(contract, token, amountStr, direction) {
 async function executeTrade(contract, arb) {
     console.log("  >> EXECUTING TRADE...");
     try {
+        console.log("  Submitting transaction...");
         const tx = await contract.executeArbitrage(
             CONFIG.proposalAddress,
             arb.borrowToken === "GNO" ? CONFIG.tokens.GNO : CONFIG.tokens.SDAI,
@@ -278,9 +298,57 @@ async function executeTrade(contract, arb) {
             { gasLimit: CONFIG.estimatedGasLimit }
         );
 
+        const explorerUrl = await getTxExplorerUrl(tx.hash);
         console.log(`  TX: ${tx.hash}`);
-        const receipt = await tx.wait();
+        console.log(`  Explorer: ${explorerUrl}`);
+        console.log("  Waiting for confirmation...");
+
+        const start = Date.now();
+        const timeoutMs = 180000;
+        const pollMs = 5000;
+        let receipt = null;
+
+        while (Date.now() - start < timeoutMs) {
+            receipt = await ethers.provider.getTransactionReceipt(tx.hash);
+
+            if (receipt) {
+                break;
+            }
+
+            const pendingTx = await ethers.provider.getTransaction(tx.hash);
+            if (!pendingTx) {
+                console.log("  Tx dropped from mempool or not found on node.");
+                break;
+            }
+
+            const age = ((Date.now() - start) / 1000).toFixed(1);
+            console.log(`  Pending... (${age}s)`);
+            await sleep(pollMs);
+        }
+
+        if (!receipt) {
+            console.log("  Confirmation timeout. Continuing scan.");
+            logEvent({
+                type: "trade_error",
+                timestamp: new Date().toISOString(),
+                txHash: tx.hash,
+                status: "timeout",
+                strategy: arb.strategy,
+                amount: arb.amount,
+                txUrl: explorerUrl,
+            });
+            return;
+        }
+
+        const latestBlock = await ethers.provider.getBlockNumber();
+        const confirmations = receipt.blockNumber ? Number(latestBlock - receipt.blockNumber + 1) : 0;
         console.log(`  Status: ${receipt.status === 1 ? "SUCCESS" : "FAIL"}`);
+        console.log(`  Block: ${receipt.blockNumber}`);
+        console.log(`  Confirmations: ${confirmations}`);
+        console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
+        if (receipt.effectiveGasPrice) {
+            console.log(`  Effective gas price: ${ethers.formatUnits(receipt.effectiveGasPrice, "gwei")} gwei`);
+        }
 
         if (receipt.status === 1) {
             sessionTotalProfit += arb.profit;
@@ -295,10 +363,20 @@ async function executeTrade(contract, arb) {
             gasUsed: receipt.gasUsed.toString(),
             strategy: arb.strategy,
             amount: arb.amount,
+            txUrl: explorerUrl,
+            blockNumber: receipt.blockNumber.toString(),
+            confirmations,
             sessionTotal: sessionTotalProfit
         });
     } catch (error) {
         console.error("  Execution Error:", error.message.slice(0, 200));
+        logEvent({
+            type: "trade_error",
+            timestamp: new Date().toISOString(),
+            error: error.message?.slice(0, 200),
+            strategy: arb.strategy,
+            amount: arb.amount,
+        });
     }
 }
 
