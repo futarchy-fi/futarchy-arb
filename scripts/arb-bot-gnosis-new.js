@@ -272,15 +272,19 @@ async function simulateArbitrage(contract, token, amountStr, direction) {
 }
 
 function calculateNetProfit(grossProfitGno, gasPriceWei, gnoPriceSdai) {
+    // Gnosis chain: gas is paid in xDAI (native token), ~1 USD
+    // gnoPriceSdai ≈ sDAI/GNO ≈ USD/GNO
     const gasCostWei = gasPriceWei * BigInt(CONFIG.estimatedGasLimit);
-    const gasCostGno = parseFloat(ethers.formatEther(gasCostWei));
+    const gasCostXdai = parseFloat(ethers.formatEther(gasCostWei));  // xDAI ≈ $1
+    const gasCostGno = gasCostXdai / gnoPriceSdai;                   // convert to GNO
     return grossProfitGno - gasCostGno;
 }
 
 function calculateGasCostInSdai(gasPriceWei, gnoPriceSdai) {
+    // Gnosis chain: gas in xDAI ≈ sDAI ≈ $1
     const gasCostWei = gasPriceWei * BigInt(CONFIG.estimatedGasLimit);
-    const gasCostGno = parseFloat(ethers.formatEther(gasCostWei));
-    return gasCostGno * gnoPriceSdai;
+    const gasCostSdai = parseFloat(ethers.formatEther(gasCostWei));   // xDAI ≈ sDAI
+    return gasCostSdai;
 }
 
 async function executeTrade(contract, arb) {
