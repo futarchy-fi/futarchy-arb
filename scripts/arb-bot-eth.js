@@ -51,6 +51,8 @@ const CONFIG = {
     scanIntervalMs: parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10),
     minProfitWETH: process.env.MIN_PROFIT_WETH || '0',
     gasMargin: parseFloat(process.env.GAS_MARGIN || '1.5'), // execute only if profit > gasCost x margin
+    maxBorrowWETH: parseFloat(process.env.MAX_BORROW_WETH || '100'), // adaptive size search ceiling
+    sizeGrowth: parseFloat(process.env.SIZE_GROWTH || '2.5'),        // geometric ladder factor
 
     heartbeatFile: path.join(__dirname, '..', 'logs', 'eth-arb-heartbeat.json'),
     heartbeatUrl: process.env.HEARTBEAT_URL || '',
@@ -166,8 +168,14 @@ async function scanOnce(provider, contract) {
         const minProfit = ethers.parseEther(CONFIG.minProfitWETH);
         let best = null;
 
-        for (const amountNum of CONFIG.testAmounts) {
-            const amount = ethers.parseEther(amountNum.toString());
+        // Adaptive size search: profit(size) is unimodal (grows until price impact
+        // eats the edge), so walk a geometric ladder and stop after the peak.
+        // Simulations are free; this finds the max-profit size at any pool depth.
+        let amountNum = CONFIG.testAmounts[0];
+        let declines = 0;
+        let revertStreak = 0;
+        while (amountNum <= CONFIG.maxBorrowWETH && declines < 2 && revertStreak < 3) {
+            const amount = ethers.parseEther(amountNum.toFixed(18));
             try {
                 const result = await contract.executeArbitrage.staticCall(
                     amount, direction, minProfit, 0,
@@ -176,8 +184,12 @@ async function scanOnce(provider, contract) {
                 const profitWETH = parseFloat(ethers.formatEther(result.profit));
                 const profitUSD = profitWETH * prices.spotPrice;
                 console.log(`    ${amountNum} WETH => profit ${profitWETH.toFixed(8)} WETH ($${profitUSD.toFixed(4)})`);
+                revertStreak = 0;
                 if (!best || result.profit > best.profit) {
                     best = { amountNum, amount, profit: result.profit, profitWETH, profitUSD };
+                    declines = 0;
+                } else {
+                    declines++;
                 }
             } catch (e) {
                 let msg = e.shortMessage || e.reason || 'REVERT';
@@ -186,7 +198,10 @@ async function scanOnce(provider, contract) {
                     msg = `${e.revert.args[2]} (shortfall ${shortfall} WETH)`;
                 }
                 console.log(`    ${amountNum} WETH => ❌ ${msg}`);
+                revertStreak++;
+                if (best) declines++; // reverts past the peak also end the search
             }
+            amountNum *= CONFIG.sizeGrowth;
         }
 
         if (!best) {
