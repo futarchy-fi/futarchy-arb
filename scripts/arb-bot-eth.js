@@ -50,6 +50,7 @@ const CONFIG = {
     divergenceThreshold: parseFloat(process.env.DIVERGENCE_THRESHOLD || '0.01'),
     scanIntervalMs: parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10),
     minProfitWETH: process.env.MIN_PROFIT_WETH || '0',
+    gasMargin: parseFloat(process.env.GAS_MARGIN || '1.5'), // execute only if profit > gasCost x margin
 
     heartbeatFile: path.join(__dirname, '..', 'logs', 'eth-arb-heartbeat.json'),
     heartbeatUrl: process.env.HEARTBEAT_URL || '',
@@ -190,6 +191,11 @@ async function scanOnce(provider, contract) {
 
         if (!best) {
             action = `${dirName}: all simulations reverted`;
+        } else if (best.profitUSD < prices.gasCostUSD * CONFIG.gasMargin) {
+            // Kimi adversary finding: without this gate, every fire at thin depth
+            // loses money to gas even when the sim shows on-chain "profit".
+            action = `${dirName}: skipped, profit $${best.profitUSD.toFixed(4)} < gas $${prices.gasCostUSD.toFixed(4)} x${CONFIG.gasMargin}`;
+            console.log(`  ⛽ ${action}`);
         } else if (process.env.CONFIRM !== 'true') {
             action = `${dirName}: dry-run, best ${best.amountNum} WETH => +${best.profitWETH.toFixed(8)} WETH`;
             console.log('  💡 To execute, run with: CONFIRM=true node scripts/arb-bot-eth.js');
