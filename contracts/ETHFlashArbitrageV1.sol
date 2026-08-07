@@ -139,6 +139,7 @@ contract ETHFlashArbitrageV1 is ReentrancyGuard {
     ArbitrageParams private _params;
     address private _profitRecipient;
     ArbitrageResult private _lastResult;
+    bool private _flashPending; // guards receiveFlashLoan against third-party-initiated flash loans
 
     // ==========================================================================
     // EVENTS & ERRORS
@@ -227,7 +228,9 @@ contract ETHFlashArbitrageV1 is ReentrancyGuard {
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = borrowAmount;
 
+        _flashPending = true;
         balancerVault.flashLoan(address(this), tokens, amounts, abi.encode(_params));
+        _flashPending = false;
 
         result = _lastResult;
         result.gasUsed = gasStart - gasleft();
@@ -245,6 +248,7 @@ contract ETHFlashArbitrageV1 is ReentrancyGuard {
         bytes memory userData
     ) external {
         require(msg.sender == address(balancerVault), "Only Balancer Vault");
+        require(_flashPending, "Unsolicited flash loan");
 
         ArbitrageParams memory params = abi.decode(userData, (ArbitrageParams));
         uint256 repayAmount = amounts[0] + feeAmounts[0];
