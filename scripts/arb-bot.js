@@ -202,6 +202,26 @@ async function runScanCycle(contract, signer) {
             netProfit: bestArb.netProfit
         } : null
     });
+
+    // Heartbeat for the status bot (same convention as arb-bot-eth.js)
+    try {
+        const hbPath = path.join(__dirname, "..", "logs", "gnosis-arb-heartbeat.json");
+        fs.mkdirSync(path.dirname(hbPath), { recursive: true });
+        fs.writeFileSync(hbPath, JSON.stringify({
+            timestamp: new Date().toISOString(),
+            block: await ethers.provider.getBlockNumber(),
+            gasGwei: parseFloat(gasPriceGwei),
+            bestOpportunity: bestArb ? {
+                strategy: bestArb.strategy,
+                amount: bestArb.amount,
+                netProfit: bestArb.netProfit
+            } : null,
+            sessionTotalProfit
+        }, null, 2) + "\n");
+        if (process.env.HEARTBEAT_URL) fetch(process.env.HEARTBEAT_URL).catch(() => {});
+    } catch (e) {
+        console.log("heartbeat write failed:", e.message);
+    }
 }
 
 async function simulateArbitrage(contract, token, amountStr, direction) {
