@@ -271,7 +271,9 @@ contract ETHFlashArbitrageV1 is ReentrancyGuard {
             revert ArbitrageFailed(wethBalance, repayAmount, "Profit below minimum");
         }
 
-        IERC20(WETH).transfer(address(balancerVault), repayAmount);
+        // Use SafeERC20 for repayment so a non-standard token implementation
+        // cannot silently report failure and leave the flash loan underpaid.
+        IERC20(WETH).safeTransfer(address(balancerVault), repayAmount);
 
         if (profit > 0) {
             IERC20(WETH).safeTransfer(_profitRecipient, profit);

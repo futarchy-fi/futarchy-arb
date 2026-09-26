@@ -200,6 +200,31 @@ describe("ETHFlashArbitrageV1 mainnet fork", function () {
         await runArb(MERGE_SPOT, "MERGE_SPOT");
     });
 
+    it("3c. unprofitable path reverts atomically", async function () {
+        // A one-WETH minimum profit is impossible for a 0.0002 WETH borrow.
+        // The fork must reject the path (either at repayment or min-profit
+        // validation) and leave the contract balance unchanged.
+        const arbAddr = await arb.getAddress();
+        const before = await weth.balanceOf(arbAddr);
+        let reverted = false;
+        try {
+            await arb.executeArbitrage.staticCall(
+                ethers.parseEther("0.0002"),
+                SPOT_SPLIT,
+                ethers.parseEther("1"),
+                0,
+                { gasLimit: 3000000n }
+            );
+        } catch (e) {
+            reverted = true;
+            // Preserve the revert payload in test output while accepting
+            // either custom error (profit/repayment) from current fork prices.
+            expect(e.message).to.match(/revert|CALL_EXCEPTION|execution/i);
+        }
+        expect(reverted, "unprofitable path must revert").to.equal(true);
+        expect(await weth.balanceOf(arbAddr), "static call is atomic").to.equal(before);
+    });
+
     it("4. executeArbitrage is admin-gated", async function () {
         const [, stranger] = await ethers.getSigners();
         let reverted = false;
