@@ -15,7 +15,8 @@
  *   PRIVATE_KEY_ETH       admin key (unset => price-scan-only mode)
  *   DIVERGENCE_THRESHOLD  fraction, default 0.01 (1%)
  *   SCAN_INTERVAL_MS      default 30000
- *   TEST_AMOUNTS_WETH     comma list, default "0.0002,0.0005,0.001" (pools hold a few dollars)
+ *   TEST_AMOUNTS_WETH     comma-separated seed ladder, default
+ *                         "0.00005,0.0001,0.0002,0.0005,0.001"
  *   MIN_PROFIT_WETH       on-chain minProfit, default 0 (economics is price alignment)
  *   HEARTBEAT_URL         optional; GET on every loop, fire-and-forget
  *   ONCE=true             single scan then exit (for testing)
@@ -44,7 +45,7 @@ const CONFIG = {
     gasLimit: 3000000n,
 
     // Amounts to test (in WETH) - conditional pools only hold a few dollars
-    testAmounts: (process.env.TEST_AMOUNTS_WETH || '0.0002,0.0005,0.001')
+    testAmounts: (process.env.TEST_AMOUNTS_WETH || '0.00005,0.0001,0.0002,0.0005,0.001')
         .split(',').map(s => parseFloat(s.trim())).filter(n => n > 0),
 
     divergenceThreshold: parseFloat(process.env.DIVERGENCE_THRESHOLD || '0.01'),
@@ -82,6 +83,34 @@ const POOL_ABI = [
 ];
 
 const DIRECTION = { SPOT_SPLIT: 0, MERGE_SPOT: 1 };
+
+/**
+ * Normalize configured seed sizes and extend them geometrically to the cap.
+ * Every explicit seed is tested once; this avoids silently ignoring all but
+ * TEST_AMOUNTS_WETH[0], which hid executable (but usually sub-gas) tiny quotes.
+ */
+function candidateSizeLadder(seedAmounts, growth, maxBorrow) {
+    if (!Number.isFinite(growth) || growth <= 1) {
+        throw new Error('SIZE_GROWTH must be greater than 1');
+    }
+    if (!Number.isFinite(maxBorrow) || maxBorrow <= 0) {
+        throw new Error('MAX_BORROW_WETH must be greater than 0');
+    }
+
+    const amounts = [...new Set(seedAmounts)]
+        .filter(n => Number.isFinite(n) && n > 0 && n <= maxBorrow)
+        .sort((a, b) => a - b);
+    if (amounts.length === 0) {
+        throw new Error('TEST_AMOUNTS_WETH must contain a positive size within MAX_BORROW_WETH');
+    }
+
+    let next = amounts[amounts.length - 1] * growth;
+    while (next <= maxBorrow) {
+        amounts.push(next);
+        next *= growth;
+    }
+    return amounts;
+}
 
 // =============================================================================
 // PRICES
@@ -152,11 +181,13 @@ async function scanOnce(provider, contract) {
         ` | div ${(prices.divergence * 100).toFixed(3)}%`);
 
     let action = 'none';
+    let executionState = 'NO_OPPORTUNITY';
 
     if (Math.abs(prices.divergence) <= CONFIG.divergenceThreshold) {
         action = 'below-threshold';
     } else if (!contract) {
         action = 'no-contract-or-key (price-scan-only)';
+        executionState = 'PRICE_SCAN_ONLY';
         console.log('  ⚠️ Divergence above threshold but ETH_ARB_CONTRACT/PRIVATE_KEY_ETH not set');
     } else {
         // Conditional pools rich vs spot => sell conditional WETH => SPOT_SPLIT
@@ -171,10 +202,18 @@ async function scanOnce(provider, contract) {
         // Adaptive size search: profit(size) is unimodal (grows until price impact
         // eats the edge), so walk a geometric ladder and stop after the peak.
         // Simulations are free; this finds the max-profit size at any pool depth.
-        let amountNum = CONFIG.testAmounts[0];
         let declines = 0;
         let revertStreak = 0;
-        while (amountNum <= CONFIG.maxBorrowWETH && declines < 2 && revertStreak < 3) {
+        const candidateAmounts = candidateSizeLadder(
+            CONFIG.testAmounts, CONFIG.sizeGrowth, CONFIG.maxBorrowWETH
+        );
+        const configuredSeedMax = Math.max(
+            ...CONFIG.testAmounts.filter(n => n > 0 && n <= CONFIG.maxBorrowWETH)
+        );
+        for (const amountNum of candidateAmounts) {
+            // Honor every explicit seed. Peak/revert early-stop applies only to
+            // the generated geometric extension beyond the configured ladder.
+            if (amountNum > configuredSeedMax && (declines >= 2 || revertStreak >= 3)) break;
             const amount = ethers.parseEther(amountNum.toFixed(18));
             try {
                 const result = await contract.executeArbitrage.staticCall(
@@ -201,18 +240,20 @@ async function scanOnce(provider, contract) {
                 revertStreak++;
                 if (best) declines++; // reverts past the peak also end the search
             }
-            amountNum *= CONFIG.sizeGrowth;
         }
 
         if (!best) {
             action = `${dirName}: all simulations reverted`;
+            executionState = 'NO_EXECUTABLE_QUOTE';
         } else if (best.profitUSD < prices.gasCostUSD * CONFIG.gasMargin) {
             // Kimi adversary finding: without this gate, every fire at thin depth
             // loses money to gas even when the sim shows on-chain "profit".
             action = `${dirName}: skipped, profit $${best.profitUSD.toFixed(4)} < gas $${prices.gasCostUSD.toFixed(4)} x${CONFIG.gasMargin}`;
+            executionState = 'NO_POST_GAS_PROFIT';
             console.log(`  ⛽ ${action}`);
         } else if (process.env.CONFIRM !== 'true') {
             action = `${dirName}: dry-run, best ${best.amountNum} WETH => +${best.profitWETH.toFixed(8)} WETH`;
+            executionState = 'PROFITABLE_DRY_RUN';
             console.log('  💡 To execute, run with: CONFIRM=true node scripts/arb-bot-eth.js');
         } else {
             console.log(`  🔥 EXECUTING: ${dirName} ${best.amountNum} WETH...`);
@@ -226,10 +267,12 @@ async function scanOnce(provider, contract) {
                 console.log(`  ✅ SUCCESS! Block ${receipt.blockNumber}, gas ${receipt.gasUsed}`);
                 console.log('  View: https://etherscan.io/tx/' + tx.hash);
                 action = `${dirName}: EXECUTED ${best.amountNum} WETH, tx ${tx.hash}`;
+                executionState = 'EXECUTED';
             } catch (e) {
                 const msg = e.shortMessage || e.reason || e.message.slice(0, 100);
                 console.log('  ❌ EXECUTION FAILED:', msg);
                 action = `${dirName}: execution failed: ${msg}`;
+                executionState = 'EXECUTION_FAILED';
             }
         }
     }
@@ -246,6 +289,8 @@ async function scanOnce(provider, contract) {
         divergence: prices.divergence,
         threshold: CONFIG.divergenceThreshold,
         gasGwei: prices.gasGwei,
+        runtimeHealth: 'healthy',
+        executionState,
         action,
     });
 }
@@ -288,14 +333,24 @@ async function main() {
             await scanOnce(provider, contract);
         } catch (e) {
             console.log('⚠️ scan error:', e.shortMessage || e.message);
-            heartbeat({ timestamp: new Date().toISOString(), error: e.shortMessage || e.message, action: 'scan-error' });
+            heartbeat({
+                timestamp: new Date().toISOString(),
+                runtimeHealth: 'error',
+                executionState: 'SCAN_ERROR',
+                error: e.shortMessage || e.message,
+                action: 'scan-error',
+            });
         }
         if (process.env.ONCE === 'true') break;
         await new Promise(r => setTimeout(r, CONFIG.scanIntervalMs));
     }
 }
 
-main().catch(e => {
-    console.error('Fatal error:', e.message);
-    process.exit(1);
-});
+if (require.main === module) {
+    main().catch(e => {
+        console.error('Fatal error:', e.message);
+        process.exit(1);
+    });
+}
+
+module.exports = { candidateSizeLadder };
