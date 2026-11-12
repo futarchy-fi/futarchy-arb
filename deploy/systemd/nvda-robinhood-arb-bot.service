@@ -22,7 +22,11 @@ Environment=MAX_NVDA_PER_TRADE=10
 Environment=HEARTBEAT_FILE=%h/shared/nvda-robinhood-arb-heartbeat.json
 Environment=TRADE_LOG_FILE=%h/data/arb-logs/nvda-robinhood-trades.jsonl
 Environment=ALERT_CMD=%h/.local/bin/general-status-send
+ExecStartPre=/bin/mkdir -p %h/data/arb-logs
 ExecStart=%h/.local/bin/node scripts/arb-bot-nvda-robinhood.js
+# The user journal on farol is not readable, so the log goes to a file.
+StandardOutput=append:%h/data/arb-logs/nvda-robinhood-arb-bot.log
+StandardError=append:%h/data/arb-logs/nvda-robinhood-arb-bot.log
 Restart=always
 RestartSec=15
 

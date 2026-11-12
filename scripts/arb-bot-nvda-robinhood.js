@@ -171,6 +171,7 @@ async function ethPriceUsdg() {
     return ethPriceCache.value;
 }
 
+let lastOddRevertLogAt = 0;
 /** Simulated USDG profit of one size, or -1 when the call reverts (no arbitrage at that size). */
 async function simulate(nvda, direction) {
     try {
@@ -179,8 +180,13 @@ async function simulate(nvda, direction) {
         );
         return Number(ethers.formatUnits(profit, 6));
     } catch (e) {
-        if (e.code === 'CALL_EXCEPTION') return -1; // ArbitrageFailed: not profitable at this size
-        throw e; // RPC trouble: let the main loop back off
+        if (e.code !== 'CALL_EXCEPTION') throw e; // RPC trouble: let the main loop back off
+        // ArbitrageFailed means "not profitable at this size". Any other revert is unexpected: say so once a minute.
+        if (!(e.revert && e.revert.name === 'ArbitrageFailed') && Date.now() - lastOddRevertLogAt > 60000) {
+            lastOddRevertLogAt = Date.now();
+            log(`WARN simulation of ${nvda} NVDA ${DIRECTION_NAME[direction]} reverted without ArbitrageFailed: ${(e.shortMessage || e.message || '').slice(0, 160)}`);
+        }
+        return -1;
     }
 }
 

@@ -30,7 +30,7 @@ If only one conditional pool moves, spot is still between YES and NO and there i
 
 ```bash
 systemctl --user status nvda-robinhood-arb-bot.service
-journalctl --user -u nvda-robinhood-arb-bot.service -f      # one line per decision
+tail -f ~/data/arb-logs/nvda-robinhood-arb-bot.log          # one line per decision
 cat ~/shared/nvda-robinhood-arb-heartbeat.json               # written every cycle
 tail ~/data/arb-logs/nvda-robinhood-trades.jsonl             # one line per transaction
 systemctl --user stop nvda-robinhood-arb-bot.service         # stop (disable to keep it off after a reboot)

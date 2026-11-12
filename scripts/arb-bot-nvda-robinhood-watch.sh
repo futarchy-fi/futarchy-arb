@@ -29,4 +29,4 @@ fi
 mkdir -p "$(dirname "$STAMP")"
 touch "$STAMP"
 echo "$(date -u +%FT%TZ) ALERT $problem"
-"$ALERT" --source nvda-robinhood-arb "NVDA arb bot (Robinhood Chain) on $(hostname): $problem. Check: journalctl --user -u $UNIT -n 50"
+"$ALERT" --source nvda-robinhood-arb "NVDA arb bot (Robinhood Chain) on $(hostname): $problem. Check: tail -50 ~/data/arb-logs/nvda-robinhood-arb-bot.log"
