@@ -22,6 +22,12 @@ interface IUniswapV3PoolMinimal {
     ) external returns (int256 amount0, int256 amount1);
 }
 
+interface IFutarchyProposalMinimal {
+    function collateralToken1() external view returns (address);
+    function collateralToken2() external view returns (address);
+    function wrappedOutcome(uint256 index) external view returns (address wrapped1155, bytes memory data);
+}
+
 interface IFutarchyRouter {
     function splitPosition(address proposal, address collateralToken, uint256 amount) external;
     function mergePositions(address proposal, address collateralToken, uint256 amount) external;
@@ -49,28 +55,31 @@ interface IFutarchyRouter {
  *        approval to anything. The only approvals are exact amounts to the FutarchyRouter, consumed in the same call.
  *      - NVDA has 18 decimals and USDG 6. Outcome tokens have the decimals of their collateral. No price is
  *        computed on-chain: the only check is the realised USDG profit.
- *      - Profit is always measured and paid in USDG, and `executeArbitrage` is owner-only.
+ *      - Profit is always measured in USDG and paid to the treasury. `executeArbitrage` can only be called by
+        the operator (the bot's own key, which holds nothing but gas) or the owner.
+      - The market (proposal and its two conditional pools) is a constructor argument, so a new market for the
+        same NVDA/USDG pair needs a new deployment but no source change. Token order in each pool is read
+        from the pool.
  *
  *      Profit-or-revert: `executeArbitrage` reverts unless the USDG gained is at least `minProfit`. The contract
- *      holds nothing between calls: USDG profit and any leftover outcome tokens go to the owner in the same call.
+ *      holds nothing between calls: USDG profit and any leftover outcome tokens go to the treasury in the same call.
  */
 contract NVDAFlashArbitrageRobinhood {
     // ==========================================================================
-    // CONSTANTS (Robinhood Chain, verified on-chain in the constructor)
+    // CONSTANTS (Robinhood Chain) AND THE MARKET (set and checked in the constructor)
     // ==========================================================================
 
     address public constant NVDA = 0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC; // 18 decimals
     address public constant USDG = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168; // 6 decimals
-
-    address public constant PROPOSAL = 0x9693989EF16C43274D0b85138BaF22F21651970a;
-    address public constant YES_NVDA = 0x77B80692651F2e92Ed97eACA828dde7dcAcFcdBa;
-    address public constant NO_NVDA = 0x88A914eB5b3F02B4e2d315Cc1275A8d7d659942d;
-    address public constant YES_USDG = 0x5744CeC6770CBb1f20c7Fd370B3DC8940133e43A;
-    address public constant NO_USDG = 0xbB42e72258217E4893dE20A42a44746c312234A6;
-
     address public constant SPOT_POOL = 0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3; // USDG / NVDA, fee 500
-    address public constant YES_POOL = 0xba71c15c9A92a3875144Accc0416FE67D898b77C; // YES_USDG / YES_NVDA, fee 500
-    address public constant NO_POOL = 0x2616fBb93e1b3283d2a14760768D5Ec2ec352c90; // NO_NVDA / NO_USDG, fee 500
+
+    address public immutable PROPOSAL;
+    address public immutable YES_NVDA;
+    address public immutable NO_NVDA;
+    address public immutable YES_USDG;
+    address public immutable NO_USDG;
+    address public immutable YES_POOL; // YES_NVDA / YES_USDG in either order, fee 500
+    address public immutable NO_POOL; // NO_NVDA / NO_USDG in either order, fee 500
 
     IFutarchyRouter public constant futarchyRouter = IFutarchyRouter(0x7834bB7f4724393043701B2A944feaE0496e00AD);
 
@@ -85,7 +94,9 @@ contract NVDAFlashArbitrageRobinhood {
     // STATE
     // ==========================================================================
 
-    address public owner;
+    address public owner; // sets the operator and the treasury, recovers stray tokens
+    address public operator; // the bot: may only call executeArbitrage
+    address public treasury; // receives the profit
     bool private _executing;
 
     enum ArbitrageDirection {
@@ -99,8 +110,11 @@ contract NVDAFlashArbitrageRobinhood {
 
     event ArbitrageExecuted(address indexed caller, ArbitrageDirection direction, uint256 nvdaAmount, uint256 profitUsdg);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OperatorChanged(address indexed previousOperator, address indexed newOperator);
+    event TreasuryChanged(address indexed previousTreasury, address indexed newTreasury);
 
     error NotOwner();
+    error NotOperator();
     error NotExecuting();
     error UnknownPool(address pool);
     error PoolMismatch(address pool);
@@ -112,23 +126,52 @@ contract NVDAFlashArbitrageRobinhood {
         _;
     }
 
+    modifier onlyOperator() {
+        if (msg.sender != operator && msg.sender != owner) revert NotOperator();
+        _;
+    }
+
     // ==========================================================================
     // CONSTRUCTOR
     // ==========================================================================
 
-    constructor() {
+    /**
+     * @param proposal The futarchy proposal (collateral 1 must be NVDA, collateral 2 USDG).
+     * @param yesPool The YES_NVDA / YES_USDG pool, fee 500.
+     * @param noPool The NO_NVDA / NO_USDG pool, fee 500.
+     * @param operator_ The bot key allowed to call executeArbitrage.
+     * @param treasury_ Where the profit goes.
+     */
+    constructor(address proposal, address yesPool, address noPool, address operator_, address treasury_) {
+        require(operator_ != address(0) && treasury_ != address(0), "Zero address");
         owner = msg.sender;
+        operator = operator_;
+        treasury = treasury_;
         emit OwnershipTransferred(address(0), msg.sender);
+        emit OperatorChanged(address(0), operator_);
+        emit TreasuryChanged(address(0), treasury_);
 
-        // The token order of each pool is hardcoded below. Refuse to deploy if the chain disagrees.
+        IFutarchyProposalMinimal p = IFutarchyProposalMinimal(proposal);
+        if (p.collateralToken1() != NVDA || p.collateralToken2() != USDG) revert PoolMismatch(proposal);
+        PROPOSAL = proposal;
+        (address yesNvda,) = p.wrappedOutcome(0);
+        (address noNvda,) = p.wrappedOutcome(1);
+        (address yesUsdg,) = p.wrappedOutcome(2);
+        (address noUsdg,) = p.wrappedOutcome(3);
+        (YES_NVDA, NO_NVDA, YES_USDG, NO_USDG) = (yesNvda, noNvda, yesUsdg, noUsdg);
+
+        // Refuse to deploy unless each pool trades exactly the expected pair at fee 500.
         _checkPool(SPOT_POOL, USDG, NVDA);
-        _checkPool(YES_POOL, YES_USDG, YES_NVDA);
-        _checkPool(NO_POOL, NO_NVDA, NO_USDG);
+        _checkPool(yesPool, yesNvda, yesUsdg);
+        _checkPool(noPool, noNvda, noUsdg);
+        YES_POOL = yesPool;
+        NO_POOL = noPool;
     }
 
-    function _checkPool(address pool, address token0, address token1) private view {
+    function _checkPool(address pool, address tokenA, address tokenB) private view {
         IUniswapV3PoolMinimal p = IUniswapV3PoolMinimal(pool);
-        if (p.token0() != token0 || p.token1() != token1 || p.fee() != 500) revert PoolMismatch(pool);
+        (address t0, address t1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        if (p.token0() != t0 || p.token1() != t1 || p.fee() != 500) revert PoolMismatch(pool);
     }
 
     // ==========================================================================
@@ -140,11 +183,11 @@ contract NVDAFlashArbitrageRobinhood {
      * @param nvdaAmount NVDA (18 decimals) taken from the spot pool: bought for SPOT_SPLIT, sold for MERGE_SPOT.
      * @param direction SPOT_SPLIT (0) when both conditional prices are above spot, MERGE_SPOT (1) when below.
      * @param minProfit Minimum USDG profit (6 decimals).
-     * @return profit USDG sent to the owner.
+     * @return profit USDG sent to the treasury.
      */
     function executeArbitrage(uint256 nvdaAmount, ArbitrageDirection direction, uint256 minProfit)
         external
-        onlyOwner
+        onlyOperator
         returns (uint256 profit)
     {
         require(!_executing, "Reentrant");
@@ -174,7 +217,7 @@ contract NVDAFlashArbitrageRobinhood {
         }
         profit = usdgAfter - usdgBefore;
 
-        // Hold nothing between calls: profit and any unmatched outcome tokens go to the owner.
+        // Hold nothing between calls: profit and any unmatched outcome tokens go to the treasury.
         _sweepAll(USDG);
         _sweepAll(NVDA);
         _sweepAll(YES_USDG);
@@ -198,9 +241,9 @@ contract NVDAFlashArbitrageRobinhood {
         if (msg.sender == SPOT_POOL) {
             (token0, token1) = (USDG, NVDA);
         } else if (msg.sender == YES_POOL) {
-            (token0, token1) = (YES_USDG, YES_NVDA);
+            (token0, token1) = YES_NVDA < YES_USDG ? (YES_NVDA, YES_USDG) : (YES_USDG, YES_NVDA);
         } else if (msg.sender == NO_POOL) {
-            (token0, token1) = (NO_NVDA, NO_USDG);
+            (token0, token1) = NO_NVDA < NO_USDG ? (NO_NVDA, NO_USDG) : (NO_USDG, NO_NVDA);
         } else {
             revert UnknownPool(msg.sender);
         }
@@ -291,7 +334,7 @@ contract NVDAFlashArbitrageRobinhood {
 
     function _sweepAll(address token) internal {
         uint256 bal = _balance(token);
-        if (bal > 0) _transfer(token, owner, bal);
+        if (bal > 0) _transfer(token, treasury, bal);
     }
 
     function _transfer(address token, address to, uint256 amount) internal {
@@ -321,6 +364,18 @@ contract NVDAFlashArbitrageRobinhood {
     function recoverNative() external onlyOwner {
         (bool ok,) = owner.call{value: address(this).balance}("");
         require(ok, "Native transfer failed");
+    }
+
+    function setOperator(address newOperator) external onlyOwner {
+        require(newOperator != address(0), "Invalid operator");
+        emit OperatorChanged(operator, newOperator);
+        operator = newOperator;
+    }
+
+    function setTreasury(address newTreasury) external onlyOwner {
+        require(newTreasury != address(0), "Invalid treasury");
+        emit TreasuryChanged(treasury, newTreasury);
+        treasury = newTreasury;
     }
 
     function transferOwnership(address newOwner) external onlyOwner {

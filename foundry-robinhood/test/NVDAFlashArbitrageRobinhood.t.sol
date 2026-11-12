@@ -34,14 +34,15 @@ contract NVDAFlashArbitrageRobinhoodTest {
 
     address constant NVDA = 0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC;
     address constant USDG = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
-    address constant YES_NVDA = 0x77B80692651F2e92Ed97eACA828dde7dcAcFcdBa;
-    address constant NO_NVDA = 0x88A914eB5b3F02B4e2d315Cc1275A8d7d659942d;
-    address constant YES_USDG = 0x5744CeC6770CBb1f20c7Fd370B3DC8940133e43A;
-    address constant NO_USDG = 0xbB42e72258217E4893dE20A42a44746c312234A6;
-    address constant PROPOSAL = 0x9693989EF16C43274D0b85138BaF22F21651970a;
+    // The market under test (the live one). Both pools have the NVDA outcome token as token0.
+    address constant PROPOSAL = 0x9693b5d541B64c370987A3b2A569d8db96c4D38E;
+    address constant YES_NVDA = 0x0ad8133D43A3BD55d44F54e20ADE2e680C81d93c;
+    address constant NO_NVDA = 0x932B9b122B43fa5ace808AA8981a056eF1cCBEa5;
+    address constant YES_USDG = 0x604f72859A5c4c81BD8E7Be4079dbd5DD1b83317;
+    address constant NO_USDG = 0xd3C44de013fa10Db953c3002726f5D6aF5efC8C9;
     address constant SPOT_POOL = 0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3;
-    address constant YES_POOL = 0xba71c15c9A92a3875144Accc0416FE67D898b77C;
-    address constant NO_POOL = 0x2616fBb93e1b3283d2a14760768D5Ec2ec352c90;
+    address constant YES_POOL = 0x40cd7ACf1e7bA5dc36667cb8c44c29396f96EE8a;
+    address constant NO_POOL = 0x68a387a8dECaB57F6aA0Ac1F6f34F1ffdFb3B5ED;
     address constant ROUTER = 0x7834bB7f4724393043701B2A944feaE0496e00AD;
 
     // Large holders used only to fund this test contract on the fork.
@@ -51,11 +52,14 @@ contract NVDAFlashArbitrageRobinhoodTest {
     uint160 constant MIN_SQRT_RATIO = 4295128739;
     uint160 constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
 
+    address constant TREASURY = address(0x7EA5);
+
     NVDAFlashArbitrageRobinhood arb;
 
     function setUp() public {
         vm.createSelectFork(vm.envOr("ROBINHOOD_RPC_URL", string("https://rpc.mainnet.chain.robinhood.com")));
-        arb = new NVDAFlashArbitrageRobinhood(); // this test contract is the owner
+        // This test contract is owner and operator; profit goes to a separate treasury address.
+        arb = new NVDAFlashArbitrageRobinhood(PROPOSAL, YES_POOL, NO_POOL, address(this), TREASURY);
         vm.prank(NVDA_WHALE);
         IERC20Full(NVDA).transfer(address(this), 4500e18);
         vm.prank(USDG_WHALE);
@@ -68,8 +72,8 @@ contract NVDAFlashArbitrageRobinhoodTest {
     function price(address pool) internal view returns (uint256) {
         (uint160 sqrtP,,,,,,) = IPool(pool).slot0();
         uint256 sq = uint256(sqrtP) * uint256(sqrtP);
-        if (pool == NO_POOL) return (sq * 1e18) >> 192; // token0 NVDA(18), token1 USDG(6)
-        return (uint256(1e18) << 192) / sq; // token0 USDG(6), token1 NVDA(18)
+        if (pool == SPOT_POOL) return (uint256(1e18) << 192) / sq; // token0 USDG(6), token1 NVDA(18)
+        return (sq * 1e18) >> 192; // conditional pools: token0 NVDA(18), token1 USDG(6)
     }
 
     function sqrtOf(address pool) internal view returns (uint160 s) {
@@ -90,8 +94,8 @@ contract NVDAFlashArbitrageRobinhoodTest {
             if (d0 > 0) IERC20Full(USDG).transfer(msg.sender, uint256(d0));
             else IERC20Full(NVDA).transfer(msg.sender, uint256(d1));
         } else if (msg.sender == YES_POOL) {
-            if (d0 > 0) IERC20Full(YES_USDG).transfer(msg.sender, uint256(d0));
-            else IERC20Full(YES_NVDA).transfer(msg.sender, uint256(d1));
+            if (d0 > 0) IERC20Full(YES_NVDA).transfer(msg.sender, uint256(d0));
+            else IERC20Full(YES_USDG).transfer(msg.sender, uint256(d1));
         } else {
             require(msg.sender == NO_POOL, "unexpected pool");
             if (d0 > 0) IERC20Full(NO_NVDA).transfer(msg.sender, uint256(d0));
@@ -99,22 +103,27 @@ contract NVDAFlashArbitrageRobinhoodTest {
         }
     }
 
-    /// Make spot equal to the YES pool price (the two pools share the same token orientation).
-    function alignSpotToYes() internal {
-        moveSpotTo(sqrtOf(YES_POOL));
+    /// The spot pool's sqrt price at which spot equals the YES pool price. The YES pool is NVDA/USDG and the
+    /// spot pool USDG/NVDA, so one sqrt price is the inverse of the other.
+    function spotSqrtAtYesPrice() internal view returns (uint256) {
+        return (uint256(1) << 192) / uint256(sqrtOf(YES_POOL));
     }
 
-    /// Repeat the arbitrage in small steps until nothing is left. Returns USDG received by the owner.
+    function alignSpotToYes() internal {
+        moveSpotTo(uint160(spotSqrtAtYesPrice()));
+    }
+
+    /// Repeat the arbitrage in small steps until nothing is left. Returns USDG received by the treasury.
     /// Small steps first: one oversized trade can still be profitable on average while pushing the
     /// conditional prices past spot. The live runner avoids that by choosing the profit-maximising size.
     function arbUntilDone(NVDAFlashArbitrageRobinhood.ArbitrageDirection dir) internal returns (uint256 total, uint256 n) {
         uint256[4] memory sizes = [uint256(0.1e18), 0.2e18, 0.5e18, 1e18];
         for (uint256 i = 0; i < sizes.length; i++) {
             for (uint256 k = 0; k < 80; k++) {
-                uint256 before = IERC20Full(USDG).balanceOf(address(this));
+                uint256 before = IERC20Full(USDG).balanceOf(TREASURY);
                 try arb.executeArbitrage(sizes[i], dir, 10_000) returns (uint256 p) {
                     // minProfit 0.01 USDG
-                    require(IERC20Full(USDG).balanceOf(address(this)) - before == p, "profit not paid to owner");
+                    require(IERC20Full(USDG).balanceOf(TREASURY) - before == p, "profit not paid to treasury");
                     require(p >= 10_000, "profit below minimum");
                     total += p;
                     n++;
@@ -162,7 +171,7 @@ contract NVDAFlashArbitrageRobinhoodTest {
 
     /// Spot falls 2% below both conditional prices: SPOT_SPLIT pulls YES and NO down to spot at a profit.
     function test_spot_split_restores_prices_when_conditionals_are_above_spot() public {
-        moveSpotTo(uint160((uint256(sqrtOf(YES_POOL)) * 10_100) / 10_000)); // sqrt +1% = NVDA about 2% cheaper
+        moveSpotTo(uint160((spotSqrtAtYesPrice() * 10_100) / 10_000)); // sqrt +1% = NVDA about 2% cheaper
         logPrices("before");
         uint256 spot = price(SPOT_POOL);
         require(price(YES_POOL) > (spot * 1015) / 1000 && price(NO_POOL) > (spot * 1015) / 1000, "setup: gap missing");
@@ -184,7 +193,7 @@ contract NVDAFlashArbitrageRobinhoodTest {
 
     /// Spot rises 2% above both conditional prices: MERGE_SPOT pulls YES and NO up to spot at a profit.
     function test_merge_spot_restores_prices_when_conditionals_are_below_spot() public {
-        moveSpotTo(uint160((uint256(sqrtOf(YES_POOL)) * 9_900) / 10_000)); // sqrt -1% = NVDA about 2% dearer
+        moveSpotTo(uint160((spotSqrtAtYesPrice() * 9_900) / 10_000)); // sqrt -1% = NVDA about 2% dearer
         logPrices("before");
         uint256 spot = price(SPOT_POOL);
         require(price(YES_POOL) < (spot * 985) / 1000 && price(NO_POOL) < (spot * 985) / 1000, "setup: gap missing");
@@ -204,11 +213,11 @@ contract NVDAFlashArbitrageRobinhoodTest {
     /// With only ONE pool pushed away, spot still lies between YES and NO, so there is no arbitrage and it reverts.
     function test_conditional_pools_pushed_away_from_spot() public {
         alignSpotToYes();
-        IERC20Full(NVDA).approve(ROUTER, 3e18);
-        IFutarchyRouter(ROUTER).splitPosition(PROPOSAL, NVDA, 3e18);
+        IERC20Full(NVDA).approve(ROUTER, 6e18);
+        IFutarchyRouter(ROUTER).splitPosition(PROPOSAL, NVDA, 6e18);
 
-        // Push only the YES pool down (sell 1.5 YES_NVDA: token1 in, zeroForOne false).
-        IPool(YES_POOL).swap(address(this), false, int256(1.5e18), MAX_SQRT_RATIO - 1, "");
+        // Push only the YES pool down (sell 3 YES_NVDA: token0 in, zeroForOne true).
+        IPool(YES_POOL).swap(address(this), true, int256(3e18), MIN_SQRT_RATIO + 1, "");
         logPrices("one pushed ");
         require(price(YES_POOL) < (price(SPOT_POOL) * 995) / 1000, "setup: YES not pushed");
         vm.expectPartialRevert(NVDAFlashArbitrageRobinhood.ArbitrageFailed.selector);
@@ -216,8 +225,8 @@ contract NVDAFlashArbitrageRobinhoodTest {
         vm.expectPartialRevert(NVDAFlashArbitrageRobinhood.ArbitrageFailed.selector);
         arb.executeArbitrage(0.1e18, NVDAFlashArbitrageRobinhood.ArbitrageDirection.SPOT_SPLIT, 0);
 
-        // Push the NO pool down too (sell 1.5 NO_NVDA: token0 in, zeroForOne true).
-        IPool(NO_POOL).swap(address(this), true, int256(1.5e18), MIN_SQRT_RATIO + 1, "");
+        // Push the NO pool down too (sell 3 NO_NVDA: token0 in, zeroForOne true).
+        IPool(NO_POOL).swap(address(this), true, int256(3e18), MIN_SQRT_RATIO + 1, "");
         logPrices("both pushed");
         (uint256 profit, uint256 n) = arbUntilDone(NVDAFlashArbitrageRobinhood.ArbitrageDirection.MERGE_SPOT);
         logPrices("after      ");
@@ -230,19 +239,36 @@ contract NVDAFlashArbitrageRobinhoodTest {
         assertHoldsNothing();
     }
 
-    function test_only_the_owner_can_run_it_and_the_callback_is_closed() public {
+    function test_only_operator_or_owner_can_run_it_and_the_callback_is_closed() public {
         vm.prank(address(0xBEEF));
-        vm.expectRevert(NVDAFlashArbitrageRobinhood.NotOwner.selector);
+        vm.expectRevert(NVDAFlashArbitrageRobinhood.NotOperator.selector);
         arb.executeArbitrage(1e18, NVDAFlashArbitrageRobinhood.ArbitrageDirection.SPOT_SPLIT, 0);
 
-        vm.prank(address(0xBEEF));
+        // The operator can run it but cannot change roles or pull tokens out.
+        arb.setOperator(address(0xB07));
+        alignSpotToYes();
+        vm.prank(address(0xB07));
+        vm.expectPartialRevert(NVDAFlashArbitrageRobinhood.ArbitrageFailed.selector); // got past the access check
+        arb.executeArbitrage(0.1e18, NVDAFlashArbitrageRobinhood.ArbitrageDirection.SPOT_SPLIT, 0);
+        vm.prank(address(0xB07));
+        vm.expectRevert(NVDAFlashArbitrageRobinhood.NotOwner.selector);
+        arb.setTreasury(address(0xB07));
+        vm.prank(address(0xB07));
+        vm.expectRevert(NVDAFlashArbitrageRobinhood.NotOwner.selector);
+        arb.setOperator(address(0xBEEF));
+        vm.prank(address(0xB07));
         vm.expectRevert(NVDAFlashArbitrageRobinhood.NotOwner.selector);
         arb.recoverTokens(USDG, 1);
 
-        // Outside an owner-started run, nobody (not even a real pool) can drive the callback.
+        // Outside an operator-started run, nobody (not even a real pool) can drive the callback.
         vm.prank(SPOT_POOL);
         vm.expectRevert(NVDAFlashArbitrageRobinhood.NotExecuting.selector);
         arb.uniswapV3SwapCallback(1, -1, abi.encode(uint8(0)));
+    }
+
+    function test_refuses_to_deploy_for_mismatched_pools() public {
+        vm.expectPartialRevert(NVDAFlashArbitrageRobinhood.PoolMismatch.selector);
+        new NVDAFlashArbitrageRobinhood(PROPOSAL, NO_POOL, YES_POOL, address(this), TREASURY); // pools swapped
     }
 
     function test_owner_can_recover_tokens_sent_by_mistake() public {

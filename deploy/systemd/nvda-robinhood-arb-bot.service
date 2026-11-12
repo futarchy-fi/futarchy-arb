@@ -8,12 +8,13 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/repos/futarchy-fi/futarchy-arb
-# Holds only PRIVATE_KEY_NVDA_ROBINHOOD (owner key of the arb contract). Mode 600.
+# Holds only PRIVATE_KEY_NVDA_ROBINHOOD (the operator key of the arb contract: gas only). Mode 600.
 EnvironmentFile=%h/.config/arb-bots/nvda-robinhood.env
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # ethers is the only dependency; it lives outside the repo so the bot does not need the Hardhat toolchain.
 Environment=NODE_PATH=%h/.local/share/nvda-robinhood-arb/node_modules
 Environment=CONFIRM=true
+Environment=ARB_CONTRACT_ADDRESS=0x20e3f7227e78f398c6b0f58b9271855717c4352f
 # farol cannot reach rpc.mainnet.chain.robinhood.com (connection refused), so publicnode goes first.
 Environment=ROBINHOOD_RPC_URLS=https://robinhood-rpc.publicnode.com,https://rpc.mainnet.chain.robinhood.com
 Environment=SCAN_INTERVAL_MS=5000

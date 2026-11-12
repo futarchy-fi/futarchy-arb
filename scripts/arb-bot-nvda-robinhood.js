@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * NVDA Arbitrage Bot - Robinhood Chain (4663)
- * Uses NVDAFlashArbitrageRobinhood (flash swap on the NVDA/USDG spot pool, profit-or-revert, owner-only).
+ * Uses NVDAFlashArbitrageRobinhood (flash swap on the NVDA/USDG spot pool, profit-or-revert, operator-only).
+ * The market (proposal, YES pool, NO pool) is read from the contract, so pointing the bot at a new market
+ * only means changing ARB_CONTRACT_ADDRESS.
  *
  * Keeps the YES and NO conditional NVDA/USDG pools of the futarchy proposal consistent with spot:
  *   both conditional prices above spot -> SPOT_SPLIT (0)
@@ -17,13 +19,14 @@
  *   CONFIRM=true node scripts/arb-bot-nvda-robinhood.js    # live
  *
  * Environment (all optional except the key when CONFIRM=true):
- *   PRIVATE_KEY_NVDA_ROBINHOOD  owner key of the arb contract (falls back to PRIVATE_KEY)
+ *   PRIVATE_KEY_NVDA_ROBINHOOD  operator key of the arb contract (falls back to PRIVATE_KEY)
  *   ARB_CONTRACT_ADDRESS        default: the deployed contract below
  *   ROBINHOOD_RPC_URLS          comma-separated RPC URLs, tried in order
  *   SCAN_INTERVAL_MS            default 5000
  *   MIN_NET_PROFIT_USDG         default 0.5 (simulated profit minus gas)
  *   MAX_NVDA_PER_TRADE          default 10
  *   MIN_GAP_BPS                 default 12 (0.12%: two 0.05% pool fees plus a little)
+ *   START_NOT_BEFORE            ISO time; before it the bot watches and logs but never sends
  *   HEARTBEAT_FILE              JSON written every cycle
  *   TRADE_LOG_FILE              JSON lines, one per transaction sent
  *   ALERT_CMD                   program called with ("--source", "nvda-robinhood-arb", message); alerts are
@@ -45,8 +48,8 @@ const CONFIG = {
     chainId: 4663,
     rpcUrls: (env.ROBINHOOD_RPC_URLS || 'https://rpc.mainnet.chain.robinhood.com,https://robinhood-rpc.publicnode.com')
         .split(',').map((s) => s.trim()).filter(Boolean),
-    contract: env.ARB_CONTRACT_ADDRESS || '0xdbc389d2b4637bbd85f640f1e66397a14da003ae', // NVDAFlashArbitrageRobinhood
-    owner: '0x645A3D9208523bbFEE980f7269ac72C61Dd3b552',
+    contract: env.ARB_CONTRACT_ADDRESS || '0x20e3f7227e78f398c6b0f58b9271855717c4352f', // NVDAFlashArbitrageRobinhood
+    startNotBefore: env.START_NOT_BEFORE ? Date.parse(env.START_NOT_BEFORE) : 0,
     confirm: env.CONFIRM === 'true',
     intervalMs: Number(env.SCAN_INTERVAL_MS || 5000),
     minNetProfitUsdg: Number(env.MIN_NET_PROFIT_USDG || 0.5),
@@ -62,21 +65,27 @@ const CONFIG = {
 
 const ADDRESSES = {
     SPOT_POOL: '0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3', // token0 USDG (6), token1 NVDA (18)
-    YES_POOL: '0xba71c15c9A92a3875144Accc0416FE67D898b77C', // token0 YES_USDG (6), token1 YES_NVDA (18)
-    NO_POOL: '0x2616fBb93e1b3283d2a14760768D5Ec2ec352c90', // token0 NO_NVDA (18), token1 NO_USDG (6)
     WETH_USDG_POOL: '0x69BfaF19C9f377BB306a89aEd9F6B07e2c1a8d9a', // token0 WETH (18), token1 USDG (6)
+    // YES_POOL and NO_POOL are read from the arb contract at startup.
 };
 
 const CONTRACT_ABI = [
     'function executeArbitrage(uint256 nvdaAmount, uint8 direction, uint256 minProfit) returns (uint256 profit)',
     'function owner() view returns (address)',
+    'function operator() view returns (address)',
+    'function treasury() view returns (address)',
+    'function PROPOSAL() view returns (address)',
+    'function YES_POOL() view returns (address)',
+    'function NO_POOL() view returns (address)',
     'event ArbitrageExecuted(address indexed caller, uint8 direction, uint256 nvdaAmount, uint256 profitUsdg)',
     'error ArbitrageFailed(uint256 balanceAfter, uint256 required, string reason)',
-    'error NotOwner()',
+    'error NotOperator()',
 ];
 const POOL_ABI = [
     'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)',
+    'function token0() view returns (address)',
 ];
+const ERC20_ABI = ['function decimals() view returns (uint8)'];
 const DIRECTION = { SPOT_SPLIT: 0, MERGE_SPOT: 1 };
 const DIRECTION_NAME = ['SPOT_SPLIT', 'MERGE_SPOT'];
 
@@ -142,6 +151,7 @@ let provider;
 let contract;      // connected to the signer when live, to the provider otherwise
 let pools;
 let signer = null;
+let market = null;   // { proposal, yesPool, noPool, operator, treasury, yesUsdgFirst, noUsdgFirst }
 
 function connect() {
     const url = CONFIG.rpcUrls[rpcIndex % CONFIG.rpcUrls.length];
@@ -150,16 +160,34 @@ function connect() {
     const key = env.PRIVATE_KEY_NVDA_ROBINHOOD || env.PRIVATE_KEY;
     signer = key ? new ethers.Wallet(key, provider) : null;
     contract = new ethers.Contract(CONFIG.contract, CONTRACT_ABI, signer || provider);
-    pools = Object.fromEntries(Object.entries(ADDRESSES).map(([k, a]) => [k, new ethers.Contract(a, POOL_ABI, provider)]));
+    const all = { ...ADDRESSES, ...(market ? { YES_POOL: market.yesPool, NO_POOL: market.noPool } : {}) };
+    pools = Object.fromEntries(Object.entries(all).map(([k, a]) => [k, new ethers.Contract(a, POOL_ABI, provider)]));
     return url;
+}
+
+/** Read the market from the contract and how each conditional pool is oriented (which side is token0). */
+async function loadMarket() {
+    const [proposal, yesPool, noPool, operator, treasury] = await Promise.all([
+        contract.PROPOSAL(), contract.YES_POOL(), contract.NO_POOL(), contract.operator(), contract.treasury(),
+    ]);
+    const usdgIsToken0 = async (pool) => {
+        const token0 = await new ethers.Contract(pool, POOL_ABI, provider).token0();
+        const decimals = Number(await new ethers.Contract(token0, ERC20_ABI, provider).decimals());
+        if (decimals !== 6 && decimals !== 18) throw new Error(`pool ${pool}: token0 has ${decimals} decimals`);
+        return decimals === 6; // the USDG outcome token has 6 decimals, the NVDA one 18
+    };
+    market = { proposal, yesPool, noPool, operator, treasury,
+        yesUsdgFirst: await usdgIsToken0(yesPool), noUsdgFirst: await usdgIsToken0(noPool) };
+    connect(); // rebuild the pool handles now that the market is known
+    return market;
 }
 
 async function readPrices() {
     const [spot, yes, no] = await Promise.all([pools.SPOT_POOL.slot0(), pools.YES_POOL.slot0(), pools.NO_POOL.slot0()]);
     return {
         spot: priceUsdgFirst(spot.sqrtPriceX96),
-        yes: priceUsdgFirst(yes.sqrtPriceX96),
-        no: priceUsdgSecond(no.sqrtPriceX96),
+        yes: (market.yesUsdgFirst ? priceUsdgFirst : priceUsdgSecond)(yes.sqrtPriceX96),
+        no: (market.noUsdgFirst ? priceUsdgFirst : priceUsdgSecond)(no.sqrtPriceX96),
     };
 }
 
@@ -176,7 +204,7 @@ let lastOddRevertLogAt = 0;
 async function simulate(nvda, direction) {
     try {
         const profit = await contract.executeArbitrage.staticCall(
-            ethers.parseEther(nvda.toFixed(18)), direction, 0, { from: CONFIG.owner }
+            ethers.parseEther(nvda.toFixed(18)), direction, 0, { from: market.operator }
         );
         return Number(ethers.formatUnits(profit, 6));
     } catch (e) {
@@ -274,7 +302,7 @@ async function cycle() {
     const amountWei = ethers.parseEther(best.nvda.toFixed(18));
     const minProfitWei = ethers.parseUnits((best.profit * CONFIG.minProfitMargin).toFixed(6), 6);
     const [gasEstimate, feeData, ethPrice] = await Promise.all([
-        contract.executeArbitrage.estimateGas(amountWei, direction, minProfitWei, { from: CONFIG.owner }),
+        contract.executeArbitrage.estimateGas(amountWei, direction, minProfitWei, { from: market.operator }),
         provider.getFeeData(),
         ethPriceUsdg(),
     ]);
@@ -287,6 +315,18 @@ async function cycle() {
         const decision = `SKIP ${name}: net below ${CONFIG.minNetProfitUsdg} USDG`;
         if (decision !== state.lastDecision || Date.now() - state.lastNoopLogAt > 60000) {
             log(`${prices} -> ${decision} (${summary})`);
+            state.lastNoopLogAt = Date.now();
+        }
+        state.lastDecision = decision;
+        beat.decision = decision;
+        writeJsonAtomic(CONFIG.heartbeatFile, beat);
+        return;
+    }
+
+    if (CONFIG.startNotBefore && Date.now() < CONFIG.startNotBefore) {
+        const decision = `HOLD until ${new Date(CONFIG.startNotBefore).toISOString()}`;
+        if (decision !== state.lastDecision || Date.now() - state.lastNoopLogAt > 60000) {
+            log(`${prices} -> ${decision} (would send ${summary})`);
             state.lastNoopLogAt = Date.now();
         }
         state.lastDecision = decision;
@@ -371,11 +411,12 @@ async function main() {
     log('NVDA ARBITRAGE BOT - Robinhood Chain (4663)');
     log(`contract=${CONFIG.contract} rpc=${url} mode=${CONFIG.confirm ? 'LIVE' : 'DRY RUN'} interval=${CONFIG.intervalMs}ms minNet=${CONFIG.minNetProfitUsdg} USDG maxSize=${CONFIG.maxNvda} NVDA minGap=${CONFIG.minGapBps}bps`);
 
-    const owner = await contract.owner();
-    if (owner.toLowerCase() !== CONFIG.owner.toLowerCase()) throw new Error(`contract owner is ${owner}, expected ${CONFIG.owner}`);
+    const m = await loadMarket();
+    log(`market proposal=${m.proposal} YES pool=${m.yesPool} NO pool=${m.noPool} operator=${m.operator} treasury=${m.treasury}`);
+    if (CONFIG.startNotBefore) log(`will not send before ${new Date(CONFIG.startNotBefore).toISOString()}`);
     if (CONFIG.confirm) {
         if (!signer) throw new Error('CONFIRM=true but no PRIVATE_KEY_NVDA_ROBINHOOD / PRIVATE_KEY');
-        if (signer.address.toLowerCase() !== owner.toLowerCase()) throw new Error(`key is for ${signer.address}, the contract owner is ${owner}`);
+        if (signer.address.toLowerCase() !== m.operator.toLowerCase()) throw new Error(`key is for ${signer.address}, the contract operator is ${m.operator}`);
         log(`signer=${signer.address} gas=${ethers.formatEther(await provider.getBalance(signer.address))} ETH`);
     }
 
