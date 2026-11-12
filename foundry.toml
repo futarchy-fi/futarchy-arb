@@ -1,0 +1,15 @@
+# Fork tests for contracts/NVDAFlashArbitrageRobinhood.sol. The rest of the repo builds with Hardhat;
+# Foundry only compiles the test below and what it imports.
+#   forge test -vv
+[profile.default]
+src = "foundry-robinhood/src"
+test = "foundry-robinhood/test"
+script = "foundry-robinhood/script"
+out = "foundry-robinhood/out"
+cache_path = "foundry-robinhood/cache"
+libs = []
+solc = "0.8.24"
+evm_version = "cancun"   # Robinhood Chain runs Cancun opcodes (the NVDA token needs them)
+optimizer = true
+optimizer_runs = 200
+via_ir = true

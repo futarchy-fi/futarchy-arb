@@ -1,0 +1,28 @@
+# systemd --user unit for the NVDA arb bot on Robinhood Chain (4663). Installed on farol as
+# ~/.config/systemd/user/nvda-robinhood-arb-bot.service
+[Unit]
+Description=NVDA/USDG futarchy arb bot (Robinhood Chain 4663)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/repos/futarchy-fi/futarchy-arb
+# Holds only PRIVATE_KEY_NVDA_ROBINHOOD (owner key of the arb contract). Mode 600.
+EnvironmentFile=%h/.config/arb-bots/nvda-robinhood.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# ethers is the only dependency; it lives outside the repo so the bot does not need the Hardhat toolchain.
+Environment=NODE_PATH=%h/.local/share/nvda-robinhood-arb/node_modules
+Environment=CONFIRM=true
+Environment=SCAN_INTERVAL_MS=5000
+Environment=MIN_NET_PROFIT_USDG=0.5
+Environment=MAX_NVDA_PER_TRADE=10
+Environment=HEARTBEAT_FILE=%h/shared/nvda-robinhood-arb-heartbeat.json
+Environment=TRADE_LOG_FILE=%h/data/arb-logs/nvda-robinhood-trades.jsonl
+Environment=ALERT_CMD=%h/.local/bin/general-status-send
+ExecStart=%h/.local/bin/node scripts/arb-bot-nvda-robinhood.js
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

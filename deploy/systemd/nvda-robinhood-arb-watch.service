@@ -1,0 +1,7 @@
+[Unit]
+Description=Alert when the NVDA arb bot (Robinhood Chain) is down or its heartbeat is stale
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/bash %h/repos/futarchy-fi/futarchy-arb/scripts/arb-bot-nvda-robinhood-watch.sh
