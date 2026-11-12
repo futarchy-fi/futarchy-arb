@@ -14,6 +14,8 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # ethers is the only dependency; it lives outside the repo so the bot does not need the Hardhat toolchain.
 Environment=NODE_PATH=%h/.local/share/nvda-robinhood-arb/node_modules
 Environment=CONFIRM=true
+# farol cannot reach rpc.mainnet.chain.robinhood.com (connection refused), so publicnode goes first.
+Environment=ROBINHOOD_RPC_URLS=https://robinhood-rpc.publicnode.com,https://rpc.mainnet.chain.robinhood.com
 Environment=SCAN_INTERVAL_MS=5000
 Environment=MIN_NET_PROFIT_USDG=0.5
 Environment=MAX_NVDA_PER_TRADE=10
