@@ -1,0 +1,13 @@
+[Unit]
+Description=Alert when the multi-option arb bot (Robinhood Chain) is down or its heartbeat is stale
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=UNIT=nvda-multi-arb-bot.service
+Environment=HEARTBEAT_FILE=%h/shared/nvda-multi-arb-heartbeat.json
+Environment=STAMP_FILE=%h/.cache/nvda-multi-arb-watch.last-alert
+Environment=LOG_FILE=%h/data/arb-logs/nvda-multi-arb-bot.log
+Environment=ALERT_SOURCE=multi-option-arb
+Environment="BOT_NAME=Multi-option arb bot (Robinhood Chain)"
+ExecStart=/bin/bash %h/repos/futarchy-fi/futarchy-arb/scripts/arb-bot-nvda-robinhood-watch.sh
